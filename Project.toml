@@ -1,0 +1,16 @@
+name = "CscapeJulia"
+uuid = "a1b2c3d4-1234-5678-9abc-def012345678"
+version = "0.2.0"
+
+[deps]
+ADRIAIndicators = "05ad51df-066f-4748-8c47-f6b67db83211"
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+ModelParameters = "4744a3fa-6c31-4707-899e-a3298e4618ad"
+RCall = "6f49c342-dc21-5d91-9882-a32aef131414"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+
+[compat]
+BenchmarkTools = "1.6.3"
+ModelParameters = "0.4.6"
+julia = "1.9"
