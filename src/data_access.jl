@@ -38,7 +38,7 @@ function load_output(fpath::String, scenario_id::Int; draw::String = "NA")
     
     array_file = joinpath(fpath, "model_outputs", 
                           "Array_scenario_$(scenario_id)_draw_$(draw).rds")
-    scenario_file = joinpath(fpath, "data", "ScenarioID.xlsx")
+    scenario_file = joinpath(fpath, "ScenarioID.xlsx")
     intervention_file = joinpath(fpath, "data", "Interventions$(scenario_id).RData")
     
     if !isfile(array_file)
@@ -49,59 +49,69 @@ function load_output(fpath::String, scenario_id::Int; draw::String = "NA")
         error("Scenario file not found: $scenario_file")
     end
     
-    @rput array_file intervention_file fpath scenario_id 
+    @rput array_file
+    @rput intervention_file
+    @rput fpath
+    @rput scenario_id
+    @rput scenario_file
     R"""
-    #Load outputs and scenario table
-    out_array_R <- readRDS($array_file)
-    scenario_id_R <- readxl::read_excel($scenario_file) |> 
-                      dplyr::filter(ID == $scenario_id) 
+    library(readxl)
 
-    spatial_file_R <- scenario_id_R$Spatial_file
-    demog_files_R <- strsplit(scenario_id_R$Growth_Surv_file, "/") [[1]]
+    # Load outputs and scenario table
+    out_array_R <- readRDS($array_file)
+    old_out_array <- out_array_R
+
+    scenario_tbl <- read_excel($scenario_file)
+    scenario_id_R <- scenario_tbl[scenario_tbl[["ID"]] == $scenario_id, , drop = FALSE]
+
+    spatial_file_R <- scenario_id_R[["Spatial_file"]][1]
+    demog_files_R <- strsplit(scenario_id_R[["Growth_Surv_file"]][1], "/")[[1]]
 
     # Load spatial & intervention data
-    spatial_R <- readRDS(file.path($fpath, "data", $spatial_file_R)) 
+    spatial_R <- readRDS(file.path($fpath, "data", spatial_file_R))
     intervention <- readRDS($intervention_file)
+    coral_df <- intervention[["Coral"]]
 
-    # Load demographic data for meshpoints    
-    meshpoints<- array(0,dim=c(length(demog_files_R),100))
-    for (ft in 1: length(demog_files_R)) {
-        demog_R <- readRDS(file.path($fpath, "data", demog_files_R[ft]))    
-        meshpoints[ft,] <- demog_R$meshpoints_diam #diameter in cm
-    }    
-    
+    # Load demographic data for meshpoints
+    meshpoints <- array(0, dim = c(length(demog_files_R), 100))
+    for (ft in seq_along(demog_files_R)) {
+        demog_R <- readRDS(file.path($fpath, "data", demog_files_R[ft]))
+        meshpoints[ft, ] <- demog_R[["meshpoints_diam"]] # diameter in cm
+    }
+
     dims_R <- dim(out_array_R)
-    dimnames_R <- dimnames(out_array_R)  
+    dimnames_R <- dimnames(out_array_R)
 
-   # Calculate intervened=3 the combined dimension
-    dims_R[3]<-3
-    dimnames_R$intervened[3]<-"combined"
-    out_array_R <- array(NA, dim=dims_R)   
-    out_array_R[,,-3,,,]<-old_out_array
+    # Calculate intervened=3 the combined dimension
+    dims_R[3] <- 3
+    dimnames_R[["intervened"]][3] <- "combined"
+    out_array_R <- array(NA, dim = dims_R)
+    out_array_R[, , -3, , , ] <- old_out_array
 
-    out_array_R[,,3,,,2:106]<-out_array_R[,,1,,,2:106]+out_array_R[,,2,,,2:106]
+    idx_sizes <- seq(2, 106)
+    out_array_R[, , 3, , , idx_sizes] <- out_array_R[, , 1, , , idx_sizes] + out_array_R[, , 2, , , idx_sizes]
 
-    site_names_R <- unique(spatial_R$reef_siteid)
-    intervened_sites_R <- unique(intervention$Coral$reef_siteid)
-    for (site in 1:length(site_names_R)){
-    if (site_names_R[site] %in% intervened_sites_R) {
-        area <- spatial_R$area[spatial_R$reef_siteid==site_names_R[site]]
-        intervened_area <- intervention$Coral$m2[intervention$Coral$reef_siteid==site_names_R[site]][1]
-        prop_area <- c((area-intervened_area), intervened_area )/area 
-    } else {
-        prop_area <- c(1,0)
+    site_names_R <- unique(spatial_R[["reef_siteid"]])
+    intervened_sites_R <- unique(coral_df[["reef_siteid"]])
+    for (site in seq_along(site_names_R)) {
+        if (site_names_R[site] %in% intervened_sites_R) {
+            area <- spatial_R[["area"]][spatial_R[["reef_siteid"]] == site_names_R[site]]
+            intervened_area <- coral_df[["m2"]][coral_df[["reef_siteid"]] == site_names_R[site]][1]
+            prop_area <- c((area - intervened_area), intervened_area) / area
+        } else {
+            prop_area <- c(1, 0)
+        }
+        out_array_R[, , 3, , , 1] <- prop_area[1] * out_array_R[, , 1, , , 1] + prop_area[2] * out_array_R[, , 2, , , 1]
     }
-    out_array_R[,,3,,,1]<-prop_area[1]*out_array_R[,,1,,,1]+prop_area[2]*out_array_R[,,2,,,1]
-    }
 
-    # Setup area 
-    area_R <- array(0, dim=c(length(site_names_R),3))
-    area_R[,1] <- spatial_R$area
+    # Setup area
+    area_R <- array(0, dim = c(length(site_names_R), 3))
+    area_R[, 1] <- spatial_R[["area"]]
     for (site in intervened_sites_R) {
-        area_R[site_names_R==site, 2] <- intervention$Coral$m2[intervention$Coral$reef_siteid==site][1]
-        area_R[site_names_R==site, 1] <- area_R[site_names_R==site, 1] - intervention$Coral$m2[intervention$Coral$reef_siteid==site][1]
+        area_R[site_names_R == site, 2] <- coral_df[["m2"]][coral_df[["reef_siteid"]] == site][1]
+        area_R[site_names_R == site, 1] <- area_R[site_names_R == site, 1] - coral_df[["m2"]][coral_df[["reef_siteid"]] == site][1]
     }
-    area_R[,3] <- area_R[:,1] + area_R[:,2]
+    area_R[, 3] <- area_R[, 1] + area_R[, 2]
 
     """
     

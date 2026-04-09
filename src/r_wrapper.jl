@@ -524,7 +524,7 @@ function _run_cscape_single(input_data::Dict;
     
     # Get fun_path from R (set by setup_r_environment)
     if isempty(fun_path)
-        fun_path = @rget .fun_path
+        #fun_path = rcopy(R".fun_path")
     end
     
     scenario_id = input_data["scenario_id"]
