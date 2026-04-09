@@ -524,7 +524,7 @@ function _run_cscape_single(input_data::Dict;
     
     # Get fun_path from R (set by setup_r_environment)
     if isempty(fun_path)
-        #fun_path = rcopy(R".fun_path")
+        fun_path = rcopy(R".fun_path")
     end
     
     scenario_id = input_data["scenario_id"]
@@ -1371,7 +1371,7 @@ function finalise_simulation(env::Dict; export_adria::Bool = true,
             base_name <- sub("\\.rds$", "", basename($filename))
             adria_filename <- paste0("adria_", base_name, ".rds")
             
-            if (grepl("/|\\\\", $filename)) {
+                        if (!identical(dirname($filename), ".")) {
               adria_file <- file.path(dirname($filename), adria_filename)
             } else {
               adria_file <- file.path($fpath, "adria_exports", adria_filename)
