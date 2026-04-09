@@ -13,6 +13,8 @@ struct CscapeOutput
     site_ids::Vector{String}
     fts::Vector{String}
     kappa::Vector{Float64}
+    area::Vector{Float64}
+    meshpoints::Array{Float64,2} # [ft, sizes]
     metadata::Dict{String,Any}
 end
 
@@ -36,30 +38,90 @@ function load_output(fpath::String, scenario_id::Int; draw::String = "NA")
     
     array_file = joinpath(fpath, "model_outputs", 
                           "Array_scenario_$(scenario_id)_draw_$(draw).rds")
+    scenario_file = joinpath(fpath, "data", "ScenarioID.xlsx")
+    intervention_file = joinpath(fpath, "data", "Interventions$(scenario_id).RData")
     
     if !isfile(array_file)
         error("Output file not found: $array_file")
     end
+
+    if !isfile(scenario_file)
+        error("Scenario file not found: $scenario_file")
+    end
     
-    @rput array_file
+    @rput array_file intervention_file fpath scenario_id 
     R"""
+    #Load outputs and scenario table
     out_array_R <- readRDS($array_file)
+    scenario_id_R <- readxl::read_excel($scenario_file) |> 
+                      dplyr::filter(ID == $scenario_id) 
+
+    spatial_file_R <- scenario_id_R$Spatial_file
+    demog_files_R <- strsplit(scenario_id_R$Growth_Surv_file, "/") [[1]]
+
+    # Load spatial & intervention data
+    spatial_R <- readRDS(file.path($fpath, "data", $spatial_file_R)) 
+    intervention <- readRDS($intervention_file)
+
+    # Load demographic data for meshpoints    
+    meshpoints<- array(0,dim=c(length(demog_files_R),100))
+    for (ft in 1: length(demog_files_R)) {
+        demog_R <- readRDS(file.path($fpath, "data", demog_files_R[ft]))    
+        meshpoints[ft,] <- demog_R$meshpoints_diam #diameter in cm
+    }    
+    
     dims_R <- dim(out_array_R)
-    dimnames_R <- dimnames(out_array_R)
+    dimnames_R <- dimnames(out_array_R)  
+
+   # Calculate intervened=3 the combined dimension
+    dims_R[3]<-3
+    dimnames_R$intervened[3]<-"combined"
+    out_array_R <- array(NA, dim=dims_R)   
+    out_array_R[,,-3,,,]<-old_out_array
+
+    out_array_R[,,3,,,2:106]<-out_array_R[,,1,,,2:106]+out_array_R[,,2,,,2:106]
+
+    site_names_R <- unique(spatial_R$reef_siteid)
+    intervened_sites_R <- unique(intervention$Coral$reef_siteid)
+    for (site in 1:length(site_names_R)){
+    if (site_names_R[site] %in% intervened_sites_R) {
+        area <- spatial_R$area[spatial_R$reef_siteid==site_names_R[site]]
+        intervened_area <- intervention$Coral$m2[intervention$Coral$reef_siteid==site_names_R[site]][1]
+        prop_area <- c((area-intervened_area), intervened_area )/area 
+    } else {
+        prop_area <- c(1,0)
+    }
+    out_array_R[,,3,,,1]<-prop_area[1]*out_array_R[,,1,,,1]+prop_area[2]*out_array_R[,,2,,,1]
+    }
+
+    # Setup area 
+    area_R <- array(0, dim=c(length(site_names_R),3))
+    area_R[,1] <- spatial_R$area
+    for (site in intervened_sites_R) {
+        area_R[site_names_R==site, 2] <- intervention$Coral$m2[intervention$Coral$reef_siteid==site][1]
+        area_R[site_names_R==site, 1] <- area_R[site_names_R==site, 1] - intervention$Coral$m2[intervention$Coral$reef_siteid==site][1]
+    }
+    area_R[,3] <- area_R[:,1] + area_R[:,2]
+
     """
     
     out_array = rcopy(R"out_array_R")
     dims = rcopy(R"dims_R")
     dimnames_r = rcopy(R"dimnames_R")
+    spatial = rcopy(R"spatial_R")
+    meshpoints = rcopy(R"meshpoints")       
     
     # RCall returns Symbol keys
-    years = parse.(Int, dimnames_r[:year])
+    years = parse.(Int, dimnames_r[:year]) 
     site_ids = String.(dimnames_r[:reef_siteid])
     fts = String.(dimnames_r[:ft])
     
-    # Load kappa from spatial file
-    kappa = ones(length(site_ids))  # Default, can be updated
-    
+    # Load kappa and area from spatial file
+    #kappa = ones(length(site_ids))  # Default, can be updated
+    kappa = spatial[!, :k]/100
+    area = rcopy(R"area_R")
+
+
     metadata = Dict{String,Any}(
         "scenario_id" => scenario_id,
         "draw" => draw,
@@ -71,7 +133,7 @@ function load_output(fpath::String, scenario_id::Int; draw::String = "NA")
     # Replace missing values with 0.0
     out_array_clean = replace(out_array, missing => 0.0)
     
-    return CscapeOutput(Float64.(out_array_clean), years, site_ids, fts, kappa, metadata)
+    return CscapeOutput(Float64.(out_array_clean), years, site_ids, fts, kappa, area, meshpoints, metadata)
 end
 
 
@@ -144,16 +206,16 @@ end
 
 
 """
-    get_cover_timeseries(output::CscapeOutput; intervention_idx=1, ft_idx=nothing) -> Matrix
+    get_cover_timeseries(output::CscapeOutput; intervention_idx=3, ft_idx=nothing) -> Matrix
 
 Get coral cover time series [years × sites].
 
 # Keywords
-- `intervention_idx::Int`: 1 = non-intervened, 2 = intervened
+- `intervention_idx::Int`: 1 = non-intervened, 2 = intervened, 3 = combined
 - `ft_idx`: Functional type index (nothing = sum all)
 """
 function get_cover_timeseries(output::CscapeOutput; 
-                               intervention_idx::Int = 1, 
+                               intervention_idx::Int = 3, 
                                ft_idx::Union{Int,Nothing} = nothing)
     
     if isnothing(ft_idx)
@@ -174,7 +236,7 @@ end
 Get size class distribution (103 classes).
 """
 function get_size_distribution(output::CscapeOutput, year::Int, site_id::String;
-                                intervention_idx::Int = 1, ft_idx::Int = 1)
+                                intervention_idx::Int = 3, ft_idx::Int = 1)
     
     year_idx = findfirst(==(year), output.years)
     site_idx = findfirst(==(site_id), output.site_ids)

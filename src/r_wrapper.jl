@@ -265,7 +265,15 @@ function setup_interventions(scenario_id::Int, fpath::String)
     }
     
     Interventions <- list(Coral=CoralAddition, Fogging=Fogging)
-    saveRDS(Interventions, file=paste0($fpath, "/data/Interventions", scn, ".RData"))
+    
+    # Save to temp file first to avoid OneDrive sync issues
+    temp_file <- tempfile(fileext = ".RData")
+    saveRDS(Interventions, file = temp_file)
+    
+    # Copy to final location
+    final_file <- paste0($fpath, "/data/Interventions", scn, ".RData")
+    file.copy(temp_file, final_file, overwrite = TRUE)
+    file.remove(temp_file)
     
     print(paste("Interventions saved for scenario", scn))
     """
