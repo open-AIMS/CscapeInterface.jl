@@ -4,6 +4,7 @@ version = "0.2.0"
 
 [deps]
 ADRIAIndicators = "05ad51df-066f-4748-8c47-f6b67db83211"
+ADRIAMCDA = "dfa1b6a5-c012-494d-82ea-9eaaae5ebba1"
 BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
 ModelParameters = "4744a3fa-6c31-4707-899e-a3298e4618ad"
@@ -12,6 +13,7 @@ SpecialFunctions = "276daf66-3868-5448-9aa4-cd146d93841b"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [compat]
+ADRIAMCDA = "0.1.0"
 BenchmarkTools = "1.6.3"
 ModelParameters = "0.4.6"
 SpecialFunctions = "2.7.2"

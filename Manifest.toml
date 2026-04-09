@@ -2,12 +2,20 @@
 
 julia_version = "1.11.5"
 manifest_format = "2.0"
-project_hash = "9a879535fe66fcc585935fe80e1881b818072939"
+project_hash = "75f434b070248c41ae59dface8bad52783d01aec"
 
 [[deps.ADRIAIndicators]]
 git-tree-sha1 = "4cccd051a5a781fba0e979a5ce7743baf9b80a9f"
 uuid = "05ad51df-066f-4748-8c47-f6b67db83211"
 version = "0.1.3"
+
+[[deps.ADRIAMCDA]]
+deps = ["DataFrames", "JMcDM"]
+git-tree-sha1 = "0f2aa481f19e8099cd2924d4a117a01e97648805"
+repo-rev = "main"
+repo-url = "https://github.com/open-AIMS/ADRIAMCDA.jl"
+uuid = "dfa1b6a5-c012-494d-82ea-9eaaae5ebba1"
+version = "0.1.0"
 
 [[deps.AbstractNumbers]]
 deps = ["SpecialFunctions"]
@@ -203,6 +211,12 @@ deps = ["Artifacts", "Preferences"]
 git-tree-sha1 = "0533e564aae234aff59ab625543145446d8b6ec2"
 uuid = "692b3bcd-3c85-4b1f-b108-f13ce0eb3210"
 version = "1.7.1"
+
+[[deps.JMcDM]]
+deps = ["Requires"]
+git-tree-sha1 = "6cc15dad7b9a58f4bce878679b341cde5000d9d3"
+uuid = "358108f5-d052-4d0a-8344-d5384e00c0e5"
+version = "0.8.2"
 
 [[deps.JSON]]
 deps = ["Dates", "Logging", "Parsers", "PrecompileTools", "StructUtils", "UUIDs", "Unicode"]

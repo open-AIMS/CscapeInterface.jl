@@ -15,6 +15,7 @@ struct CscapeOutput
     kappa::Vector{Float64}
     area::Matrix{Float64}          # [sites, intervention]
     meshpoints::Array{Float64,2} # [ft, sizes]
+    spatial::DataFrame      # Spatial data for sites
     metadata::Dict{String,Any}
 end
 
@@ -143,7 +144,7 @@ function load_output(fpath::String, scenario_id::Int; draw::String = "NA")
     # Replace missing values with 0.0
     out_array_clean = replace(out_array, missing => 0.0)
     
-    return CscapeOutput(Float64.(out_array_clean), years, site_ids, fts, kappa, area, meshpoints, metadata)
+    return CscapeOutput(Float64.(out_array_clean), years, site_ids, fts, kappa, area, meshpoints, spatial, metadata)
 end
 
 
