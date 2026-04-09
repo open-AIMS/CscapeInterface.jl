@@ -13,7 +13,7 @@ struct CscapeOutput
     site_ids::Vector{String}
     fts::Vector{String}
     kappa::Vector{Float64}
-    area::Vector{Float64}
+    area::Matrix{Float64}          # [sites, intervention]
     meshpoints::Array{Float64,2} # [ft, sizes]
     metadata::Dict{String,Any}
 end
