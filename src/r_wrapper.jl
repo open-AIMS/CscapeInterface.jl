@@ -1160,7 +1160,7 @@ function modify_simulation_state!(env::Dict;
         new_coral <- as.data.frame(coral_deployment, stringsAsFactors = FALSE)
         
         # Validate required columns
-        required <- c("reef_siteid", "Year", "ft", "no_int_corals", "m2", 
+        required <- c("reef_siteid", "Year", "ft", "no_int_corals", "proportion", "m2", "density",
                        "meshpt_int_corals", "Enhancement")
         missing_cols <- setdiff(required, names(new_coral))
         if (length(missing_cols) > 0) {
@@ -1340,7 +1340,8 @@ finalise_simulation(env, calc_indicators=false)
 """
 function finalise_simulation(env::Dict; export_adria::Bool = true, 
                               calc_indicators::Bool = true,
-                              filename::Union{String,Nothing} = nothing)
+                              filename::Union{String,Nothing} = nothing,
+                              keep_open::Bool = false)
     fpath = env["fpath"]
     scenario_id = env["scenario_id"]
     fun_path = env["fun_path"]
@@ -1398,7 +1399,10 @@ function finalise_simulation(env::Dict; export_adria::Bool = true,
         _calculate_and_save_indicators(fpath, scenario_id, draw_val)
     end
     
-    env["initialised"] = false
+    if !keep_open
+       env["initialised"] = false
+    end
+    
     @info "Simulation finalised"
 end
 
