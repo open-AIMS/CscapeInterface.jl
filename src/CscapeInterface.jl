@@ -1,5 +1,5 @@
 """
-    CscapeJulia
+    CscapeInterface
 
 Julia wrapper for C-scape coral reef simulation.
 
@@ -14,8 +14,8 @@ Pkg.instantiate()
 
 # Quick Start (Dict - simple)
 ```julia
-include("src/CscapeJulia.jl")
-using .CscapeJulia
+include("src/CscapeInterface.jl")
+using .CscapeInterface
 
 setup_r_environment()
 run_cscape(1, "/path/to/data")
@@ -69,7 +69,7 @@ run_cscape(model)
 | 7     | DHW_enhance | DHW enhancement       |
 | 8     | draw        | Posterior draw (0=mean)|
 """
-module CscapeJulia
+module CscapeInterface
 
 using RCall
 using DataFrames
