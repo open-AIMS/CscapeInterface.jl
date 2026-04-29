@@ -44,6 +44,15 @@ function setup_r_environment(fun_path::String = ""; enable_parallel::Bool = true
     @info "Setting up R environment from: $fun_path"
     
     R"""
+    # Free large globals from prior runs in the persistent RCall session.
+    stale_objects <- c("MainEnvir", "year_output", "sim_output", "output",
+                       "BATCH_IPM_CACHE", "BATCH_IPM_N_SITES", "create_ipm_original")
+    existing_objects <- intersect(stale_objects, ls(envir = .GlobalEnv))
+    if (length(existing_objects) > 0) {
+        rm(list = existing_objects, envir = .GlobalEnv)
+    }
+    invisible(gc())
+
     setwd($fun_path)
     
     # Tell main.R we're calling from Julia:
@@ -248,7 +257,7 @@ function setup_interventions(scenario_id::Int, fpath::String)
 } else {
         CoralAddition <- data.frame(scenario=numeric(), reef_siteid=factor(),
                                     Year=integer(), ft=numeric(),
-                                    no_int_corals=numeric(), m2=numeric(),
+                    no_int_corals=numeric(), proportion=numeric(), m2=numeric(), density=numeric(),
                                     meshpt_int_corals=character(), Enhancement=numeric())
     }
     
@@ -627,6 +636,15 @@ function initialise_simulation(input_data::Dict; fun_path::String = "")
     @rput input_data fun_path
     
     R"""
+    # Ensure repeated initialisation does not retain the previous simulation state.
+    stale_objects <- c("MainEnvir", "year_output", "sim_output", "output",
+                       "BATCH_IPM_CACHE", "BATCH_IPM_N_SITES", "create_ipm_original")
+    existing_objects <- intersect(stale_objects, ls(envir = .GlobalEnv))
+    if (length(existing_objects) > 0) {
+        rm(list = existing_objects, envir = .GlobalEnv)
+    }
+    invisible(gc())
+
     # Source initialise function (it sources all other required files)
     source(file.path($fun_path, "modules/run_year.R"))
     
@@ -971,7 +989,7 @@ Modify simulation state between years.
 - `fogging_reduction::Float64`: Set fogging DHW reduction factor
 - `rubble_handle::Bool`: Enable/disable rubble handling
 - `coral_deployment::Dict`: Replace coral deployment schedule (DataFrame as Dict)
-  Required keys: reef_siteid, Year, ft, no_int_corals, m2, meshpt_int_corals, Enhancement
+    Required keys: reef_siteid, Year, ft, no_int_corals, proportion, m2, density, meshpt_int_corals, Enhancement
 - `fogging_schedule::Dict`: Replace fogging schedule (DataFrame as Dict)
   Required keys: reef_siteid, year, reduction
 - `cots_mortality::Dict`: Modify COTS values in reef_temporal
@@ -995,7 +1013,9 @@ modify_simulation_state!(env;
         "Year"        => [2013, 2013],
         "ft"          => [1, 1],
         "no_int_corals" => [1000.0, 1000.0],
+        "proportion"  => [1.0, 1.0],
         "m2"          => [500.0, 500.0],
+        "density"     => [2.0, 2.0],
         "meshpt_int_corals" => ["4", "4"],
         "Enhancement" => [3, 3]
     ),
