@@ -36,10 +36,14 @@ output = load_output("/path/to/data", 1)
 ```
 ```
 """
-function load_output(fpath::String, scenario_id::Int; draw::String = "NA", output_path::String = "model_outputs")
-    
-    array_file = joinpath(fpath, output_path, 
-                          "Array_scenario_$(scenario_id)_draw_$(draw).rds")
+function load_output(fpath::String, scenario_id::Int;
+                     draw::String = "NA",
+                     output_path::String = "model_outputs",
+                     filename::Union{String,Nothing} = nothing)
+
+    array_file = isnothing(filename) ?
+        joinpath(fpath, output_path, "Array_scenario_$(scenario_id)_draw_$(draw).rds") :
+        filename
     scenario_file = joinpath(fpath, "ScenarioID.xlsx")
     intervention_file = joinpath(fpath, "data", "Interventions$(scenario_id).RData")
     
