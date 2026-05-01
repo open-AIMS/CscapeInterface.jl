@@ -762,6 +762,62 @@ end
 
 
 """
+    get_raw_simulation_output(env::Dict) -> (Array, Vector{Int}, Vector{String}, Vector{String})
+
+Extract raw simulation array and dimension names directly from R memory (no disk I/O).
+Returns `(raw_array, years, site_ids, fts)`.
+
+`MainEnvir\$out_array` always has 2 intervention dimensions; the combined slot is added
+by `build_cscape_output` in Julia. Aliases `raw_arr` / `dimnames_arr` are freed
+immediately after transfer — `MainEnvir\$out_array` is unaffected (R copy-on-modify).
+"""
+function get_raw_simulation_output(env::Dict)
+    R"""
+    raw_arr      <- MainEnvir$out_array
+    dimnames_arr <- dimnames(raw_arr)
+    """
+    raw_array  = rcopy(R"raw_arr")
+    dimnames_r = rcopy(R"dimnames_arr")
+    R"rm(raw_arr, dimnames_arr); invisible(gc())"
+
+    years    = parse.(Int, dimnames_r[:year])
+    site_ids = String.(dimnames_r[:reef_siteid])
+    fts      = String.(dimnames_r[:ft])
+    return raw_array, years, site_ids, fts
+end
+
+
+"""
+    get_combined_cover_for_ranking(env::Dict, area_mat::Matrix{Float64}) -> Array{Float64,4}
+
+Extract the cover metric (metric index 1) from `MainEnvir\$out_array` and return the
+area-weighted combined cover as `[years, sites, n_ft, n_enh]`.
+
+Transfers only ~1/106 of the full array from R; no CscapeOutput is constructed.
+`MainEnvir\$out_array` is unaffected (R copy-on-modify on the cover_slice alias).
+"""
+function get_combined_cover_for_ranking(env::Dict, area_mat::Matrix{Float64})
+    R"""
+    cover_slice <- MainEnvir$out_array[, , , , , 1]
+    """
+    cover_raw = rcopy(R"cover_slice")     # [years, sites, 2, n_ft, n_enh]
+    R"rm(cover_slice); invisible(gc())"
+
+    n_years, n_sites, _, n_ft, n_enh = size(cover_raw)
+    combined = Array{Float64,4}(undef, n_years, n_sites, n_ft, n_enh)
+    for site in 1:n_sites
+        tot      = area_mat[site, 3]
+        prop_non = tot > 0.0 ? area_mat[site, 1] / tot : 1.0
+        prop_int = tot > 0.0 ? area_mat[site, 2] / tot : 0.0
+        @views combined[:, site, :, :] .=
+            prop_non .* cover_raw[:, site, 1, :, :] .+
+            prop_int .* cover_raw[:, site, 2, :, :]
+    end
+    return combined
+end
+
+
+"""
     get_simulation_state(env::Dict)
 
 Get current simulation state information including all modifiable parameters.
@@ -1212,33 +1268,43 @@ function modify_simulation_state!(env::Dict;
         n_fts <- dim(MainEnvir$out_array)[4]
         reef_areas <- MainEnvir$reef_areas
         
+        # Pre-build O(1) lookup maps (replaces O(n_sites) which() per deploy site)
+        site_idx_map <- setNames(seq_along(MainEnvir$site_names), MainEnvir$site_names)
+        m2_lookup    <- setNames(
+            new_coral$m2[match(new_sites, new_coral$reef_siteid)],
+            new_sites
+        )
+
+        # Unset from environment so arr is the sole owner (NAMED == 1).
+        # Assignments to arr[...] then modify in-place — no full-array copies.
+        arr <- MainEnvir$out_array
+        MainEnvir$out_array <- NULL
+
         for (site in new_sites) {
-            site_idx <- which(MainEnvir$site_names == site)
-            if (length(site_idx) == 0) next
-            
-            # Skip if slot 2 already has population data
-            if (sum(abs(MainEnvir$out_array[year_idx, site_idx, "yes", , , ]), na.rm=TRUE) > 0) next
-            
-            area_i <- reef_areas[site_idx]
-            m2_i <- new_coral$m2[new_coral$reef_siteid == site][1]
-            
-            if (m2_i < area_i) {
-                prop <- m2_i / area_i
-            } else {
-                prop <- 1
-            }
-            
-            for (ft in 1:n_fts) {
-                MainEnvir$out_array[year_idx, site_idx, "yes", ft, , 2:106] <- 
-                    prop * MainEnvir$out_array[year_idx, site_idx, "no", ft, , 2:106]
-                MainEnvir$out_array[year_idx, site_idx, "no", ft, , 2:106] <- 
-                    MainEnvir$out_array[year_idx, site_idx, "no", ft, , 2:106] - 
-                    MainEnvir$out_array[year_idx, site_idx, "yes", ft, , 2:106]
-                MainEnvir$out_array[year_idx, site_idx, "yes", ft, , 1] <- 
-                    MainEnvir$out_array[year_idx, site_idx, "no", ft, , 1]
-            }
+            site_idx <- site_idx_map[[site]]
+            if (is.null(site_idx) || is.na(site_idx)) next
+
+            # Skip if intervention slot already has population data
+            if (sum(abs(arr[year_idx, site_idx, "yes", , , ]), na.rm = TRUE) > 0) next
+
+            prop <- min(m2_lookup[[site]] / reef_areas[site_idx], 1.0)
+
+            # Extract small per-site slices — new objects, do not increment NAMED of arr
+            no_sz <- arr[year_idx, site_idx, "no", , , 2:106]  # [n_ft, n_enh, 105]
+            no_cv <- arr[year_idx, site_idx, "no", , , 1]       # [n_ft, n_enh]
+
+            # Assign in-place (vectorised over all FTs); no ft loop needed
+            arr[year_idx, site_idx, "yes", , , 2:106] <- prop       * no_sz
+            arr[year_idx, site_idx, "no",  , , 2:106] <- (1 - prop) * no_sz
+            arr[year_idx, site_idx, "yes", , , 1]     <- no_cv
+            rm(no_sz, no_cv)
+
             cat("  Split population at", site, "(prop=", round(prop, 3), ")\n")
         }
+
+        # Restore array to environment (one copy)
+        MainEnvir$out_array <- arr
+        rm(arr)
         
         print(paste("Updated coral deployment:", nrow(new_coral), "entries across", 
                      length(new_sites), "sites"))

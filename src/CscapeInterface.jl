@@ -111,10 +111,11 @@ export run_cscape, run_cscape_modified, setup_interventions
 # Exports - Per-timestep control
 export initialise_simulation, run_single_year!, run_years!
 export get_simulation_state, print_simulation_state, get_site_cover
-export get_simulation_output, modify_simulation_state!, finalise_simulation
+export get_simulation_output, get_raw_simulation_output, get_combined_cover_for_ranking
+export modify_simulation_state!, finalise_simulation
 
 # Exports - Output access
-export load_output, get_yearly_data, get_site_data, get_cover_timeseries
+export load_output, build_cscape_output, get_yearly_data, get_site_data, get_cover_timeseries
 export yearly_iterator, site_iterator
 
 # Exports - Indicators
