@@ -277,6 +277,7 @@ function setup_interventions(scenario_id::Int, fpath::String)
     
     # Save to temp file first to avoid OneDrive sync issues
     temp_file <- tempfile(fileext = ".RData")
+    dir.create(dirname(temp_file), recursive = TRUE, showWarnings = FALSE)
     saveRDS(Interventions, file = temp_file)
     
     # Copy to final location
@@ -301,8 +302,8 @@ end
 Internal: calculate ADRIA indicators from saved output and save as RDS.
 Called automatically by `run_cscape` and `finalise_simulation`.
 """
-function _calculate_and_save_indicators(fpath::String, scenario_id::Int, draw_val)
-    # Convert draw to string for filename matching
+function _calculate_and_save_indicators(fpath::String, scenario_id::Int, draw_val;
+                                         output = nothing)
     draw_str = if isnothing(draw_val) || ismissing(draw_val)
         "NA"
     elseif draw_val isa Number && isnan(draw_val)
@@ -310,9 +311,11 @@ function _calculate_and_save_indicators(fpath::String, scenario_id::Int, draw_va
     else
         string(Int(draw_val))
     end
-    
+
     try
-        output = load_output(fpath, scenario_id; draw=draw_str)
+        if isnothing(output)
+            output = load_output(fpath, scenario_id; draw=draw_str)
+        end
         indicators = calculate_indicators(output)
         
         # Prepare arrays for R
@@ -550,13 +553,13 @@ function _run_cscape_single(input_data::Dict;
     R"""
     # Source the Julia batch runner
     source(file.path(.fun_path, "run_with_julia_batch.R"))
-    
+
     # Convert Julia Dict to R list
     InputData <- as.list(input_data)
-    
+
     # Handle NA
     if (is.null(InputData$draw)) InputData$draw <- NA
-    
+
     # Run simulation with Julia batch acceleration
     print("Starting simulation...")
     tic()
@@ -565,21 +568,35 @@ function _run_cscape_single(input_data::Dict;
     print("Simulation complete!")
     """
     
-    # Export for ADRIA
-    if export_adria
-        R"""
-        if (exists("quick_export_for_adria")) {
-            source(file.path($fun_path, "modules/save_outputs.R"))
-            quick_export_for_adria(InputData$scenario_id, InputData$rootdir_data, InputData$draw)
-        }
-        """
-        @info "ADRIA export complete"
-    end
-    
-    # Calculate and save ADRIA indicators
-    if calc_indicators
+    # Load output once and share between ADRIA export and indicator calculation
+    if export_adria || calc_indicators
         draw_val = get(input_data, "draw", nothing)
-        _calculate_and_save_indicators(fpath, scenario_id, draw_val)
+        draw_str = if isnothing(draw_val) || ismissing(draw_val) || (draw_val isa Number && isnan(draw_val))
+            "NA"
+        else
+            string(Int(draw_val))
+        end
+
+        built_output = try
+            load_output(fpath, scenario_id; draw=draw_str, from_envir=true)
+        catch e
+            @warn "Could not load simulation output from R environment" exception=(e, catch_backtrace())
+            nothing
+        end
+
+        if export_adria && !isnothing(built_output)
+            try
+                adria_path = joinpath(fpath, "adria_exports",
+                                      "adria_scenario_$(scenario_id)_draw_$(draw_str).jld2")
+                export_for_adria(built_output, adria_path)
+            catch e
+                @warn "ADRIA export failed" exception=(e, catch_backtrace())
+            end
+        end
+
+        if calc_indicators
+            _calculate_and_save_indicators(fpath, scenario_id, draw_val; output=built_output)
+        end
     end
     
     @info "Simulation finished!"
@@ -1439,50 +1456,52 @@ function finalise_simulation(env::Dict; export_adria::Bool = true,
         source(file.path($fun_path, "modules/save_outputs.R"))
         save_outputs(MainEnvir$out_array, MainEnvir$InputData, MainEnvir$InputData$draw)
         """
-        
-        if export_adria
-            R"""
-            quick_export_for_adria($scenario_id, $fpath, MainEnvir$InputData$draw)
-            """
-            @info "ADRIA export complete"
-        end
     else
         @rput filename
         R"""
         source(file.path($fun_path, "modules/save_outputs.R"))
         save_outputs(MainEnvir$out_array, MainEnvir$InputData, MainEnvir$InputData$draw, filename = $filename)
         """
-        
-        if export_adria
-            R"""
-            base_name <- sub("\\.rds$", "", basename($filename))
-            adria_filename <- paste0("adria_", base_name, ".rds")
-            
-                        if (!identical(dirname($filename), ".")) {
-              adria_file <- file.path(dirname($filename), adria_filename)
-            } else {
-              adria_file <- file.path($fpath, "adria_exports", adria_filename)
-            }
-            
-            library(readxl)
-            scenario_file <- paste0($fpath, "/ScenarioID.xlsx")
-            Scenarios <- read_excel(scenario_file, sheet = "ScenarioID", na = c("NA", "N/A", "na"))
-            scn_row <- Scenarios[Scenarios$ID == $scenario_id, ]
-            
-            spatial_file <- file.path($fpath, "data", scn_row$Spatial_file)
-            reef_spatial <- readRDS(spatial_file)
-            reef_spatial <- subset(reef_spatial, k > 0)
-            
-            export_for_adria(MainEnvir$out_array, reef_spatial, MainEnvir$InputData, adria_file)
-            """
-            @info "ADRIA export complete"
+    end
+
+    # Load output once from R env; share between ADRIA export and indicator calculation
+    draw_val = rcopy(R"MainEnvir$InputData$draw")
+    draw_str = if isnothing(draw_val) || ismissing(draw_val) || (draw_val isa Number && isnan(draw_val))
+        "NA"
+    else
+        string(Int(draw_val))
+    end
+
+    built_output = if export_adria || calc_indicators
+        try
+            load_output(fpath, scenario_id; draw=draw_str, from_envir=true)
+        catch e
+            @warn "Could not load simulation output from R environment" exception=(e, catch_backtrace())
+            nothing
+        end
+    else
+        nothing
+    end
+
+    if export_adria && !isnothing(built_output)
+        adria_path = if isnothing(filename)
+            joinpath(fpath, "adria_exports",
+                     "adria_scenario_$(scenario_id)_draw_$(draw_str).jld2")
+        else
+            base_name = splitext(basename(filename))[1]
+            adria_dir = dirname(filename) == "." ? joinpath(fpath, "adria_exports") : dirname(filename)
+            joinpath(adria_dir, "adria_" * base_name * ".jld2")
+        end
+        try
+            export_for_adria(built_output, adria_path)
+        catch e
+            @warn "ADRIA export failed" exception=(e, catch_backtrace())
         end
     end
-    
+
     # Calculate and save ADRIA indicators
     if calc_indicators
-        draw_val = rcopy(R"MainEnvir$InputData$draw")
-        _calculate_and_save_indicators(fpath, scenario_id, draw_val)
+        _calculate_and_save_indicators(fpath, scenario_id, draw_val; output=built_output)
     end
     
     if !keep_open

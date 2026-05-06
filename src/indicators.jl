@@ -3,6 +3,7 @@ Task 6: Connect with ADRIAIndicators
 =#
 
 using ADRIAIndicators
+using JLD2
 
 """
     to_adria_format(output::CscapeOutput; intervention_idx=1) -> NamedTuple
@@ -30,7 +31,7 @@ function to_adria_format(output::CscapeOutput; intervention_idx::Int = 3)
     
     for t in 1:n_years, g in 1:n_fts, s in 1:n_sizes, l in 1:n_sites
         # Convert diameter (cm) to area (m²): π * (diameter/200)²
-        diameter_cm = output.meshpoints[s]
+        diameter_cm = output.meshpoints[g, s]
         area_m2 = π * (diameter_cm / 200.0)^2
         absolutecover[t, g, s, l] = area_m2 * sum(output.out_array[t, l, intervention_idx, g, :, 6+s])
     end
@@ -40,7 +41,7 @@ function to_adria_format(output::CscapeOutput; intervention_idx::Int = 3)
     
     for l in 1:n_sites
         if output.area[l, intervention_idx] > 0
-            relativecover[:, :, :, l] = absolutecover[:, :, :, l] / (output.area[l, intervention_idx]*kappa[l])
+            relativecover[:, :, :, l] = absolutecover[:, :, :, l] / (output.area[l, intervention_idx] * output.kappa[l])
         end
     end
     
@@ -142,32 +143,16 @@ end
 """
     export_for_adria(output::CscapeOutput, filepath::String)
 
-Export output to file for external use.
+Save a `CscapeOutput` to a JLD2 file. Load downstream with:
+
+```julia
+using JLD2
+output = load(filepath, "cscape_output")
+adria  = to_adria_format(output)
+```
 """
 function export_for_adria(output::CscapeOutput, filepath::String)
-    
-    adria = to_adria_format(output)
-    
-    data = Dict(
-        "cover" => adria.cover,
-        "habitable_area" => adria.habitable_area,
-        "reef_area" => adria.reef_area,
-        "area" => adria.area,
-        "meshpoints" => adria.meshpoints,
-        "years" => output.years,
-        "site_names" => output.site_ids,
-        "functional_types" => output.fts,
-        "n_timesteps" => size(adria.cover, 1),
-        "n_groups" => size(adria.cover, 2),
-        "n_sizes" => size(adria.cover, 3),
-        "n_locations" => size(adria.cover, 4)
-    )
-    
-    @rput data filepath
-    R"""
-    dir.create(dirname($filepath), showWarnings = FALSE, recursive = TRUE)
-    saveRDS(data, $filepath)
-    """
-    
-    @info "Exported to $filepath"
+    mkpath(dirname(filepath))
+    jldsave(filepath; cscape_output = output)
+    @info "Exported CscapeOutput to $filepath"
 end

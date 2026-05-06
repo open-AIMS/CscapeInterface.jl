@@ -192,48 +192,67 @@ output = load_output("/path/to/data", 1)
 function load_output(fpath::String, scenario_id::Int;
                      draw::String = "NA",
                      output_path::String = "model_outputs",
-                     filename::Union{String,Nothing} = nothing)
+                     filename::Union{String,Nothing} = nothing,
+                     from_envir::Bool = false)
 
-    array_file        = isnothing(filename) ?
-        joinpath(fpath, output_path, "Array_scenario_$(scenario_id)_draw_$(draw).rds") :
-        filename
     scenario_file     = joinpath(fpath, "ScenarioID.xlsx")
     intervention_file = joinpath(fpath, "data", "Interventions$(scenario_id).RData")
-
-    isfile(array_file)    || error("Output file not found: $array_file")
     isfile(scenario_file) || error("Scenario file not found: $scenario_file")
 
-    @rput array_file intervention_file fpath scenario_id scenario_file
+    # --- extract output array ---
+    local raw_out_array, dimnames_r, source_label
+    if from_envir
+        R"""
+        .arr_env      <- MainEnvir$out_array
+        .dimnames_env <- dimnames(MainEnvir$out_array)
+        """
+        raw_out_array = rcopy(R".arr_env")
+        R"rm(.arr_env); invisible(gc())"
+        dimnames_r  = rcopy(R".dimnames_env")
+        R"rm(.dimnames_env); invisible(gc())"
+        source_label = "MainEnvir\$out_array"
+    else
+        array_file = isnothing(filename) ?
+            joinpath(fpath, output_path, "Array_scenario_$(scenario_id)_draw_$(draw).rds") :
+            filename
+        isfile(array_file) || error("Output file not found: $array_file")
+        @rput array_file
+        R"""
+        out_array_R <- readRDS($array_file)
+        dimnames_R  <- dimnames(out_array_R)
+        """
+        raw_out_array = rcopy(R"out_array_R")
+        R"rm(out_array_R); invisible(gc())"
+        dimnames_r  = rcopy(R"dimnames_R")
+        R"rm(dimnames_R); invisible(gc())"
+        source_label = array_file
+    end
+
+    # spatial / coral / meshpoints — always loaded from disk
+    @rput fpath scenario_id scenario_file intervention_file
     R"""
     library(readxl)
 
-    out_array_R  <- readRDS($array_file)
-    dimnames_R   <- dimnames(out_array_R)
-
     scenario_tbl   <- read_excel($scenario_file)
-    scenario_id_R  <- scenario_tbl[scenario_tbl[["ID"]] == $scenario_id, , drop = FALSE]
-    spatial_file_R <- scenario_id_R[["Spatial_file"]][1]
-    demog_files_R  <- strsplit(scenario_id_R[["Growth_Surv_file"]][1], "/")[[1]]
+    scen_row       <- scenario_tbl[scenario_tbl[["ID"]] == $scenario_id, , drop = FALSE]
+    spatial_file_R <- scen_row[["Spatial_file"]][1]
+    demog_files_R  <- strsplit(scen_row[["Growth_Surv_file"]][1], "/")[[1]]
 
     spatial_R    <- readRDS(file.path($fpath, "data", spatial_file_R))
-    intervention <- readRDS($intervention_file)
-    coral_df_R   <- intervention[["Coral"]]
+    interv_R     <- readRDS($intervention_file)
+    coral_df_R   <- interv_R[["Coral"]]
 
-    meshpoints <- array(0, dim = c(length(demog_files_R), 100))
+    mesh_R <- array(0, dim = c(length(demog_files_R), 100))
     for (ft in seq_along(demog_files_R)) {
-        demog_R          <- readRDS(file.path($fpath, "data", demog_files_R[ft]))
-        meshpoints[ft, ] <- demog_R[["meshpoints_diam"]]
+        demog_ft     <- readRDS(file.path($fpath, "data", demog_files_R[ft]))
+        mesh_R[ft, ] <- demog_ft[["meshpoints_diam"]]
     }
     """
 
-    raw_out_array = rcopy(R"out_array_R")
-    R"rm(out_array_R); invisible(gc())"       # free large R array immediately
-
-    dimnames_r = rcopy(R"dimnames_R")
     spatial    = rcopy(R"spatial_R")
     coral_df   = rcopy(R"coral_df_R")
-    meshpoints = rcopy(R"meshpoints")
-    R"rm(dimnames_R, spatial_R, intervention, coral_df_R, meshpoints); invisible(gc())"
+    meshpoints = rcopy(R"mesh_R")
+    R"rm(spatial_R, interv_R, coral_df_R, mesh_R); invisible(gc())"
 
     years    = parse.(Int, dimnames_r[:year])
     site_ids = String.(dimnames_r[:reef_siteid])
@@ -241,7 +260,7 @@ function load_output(fpath::String, scenario_id::Int;
 
     return build_cscape_output(raw_out_array, years, site_ids, fts,
                                 spatial, coral_df, meshpoints,
-                                scenario_id, draw, array_file)
+                                scenario_id, draw, source_label)
 end
 
 
