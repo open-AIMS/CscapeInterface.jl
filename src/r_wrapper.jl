@@ -1276,7 +1276,7 @@ function modify_simulation_state!(env::Dict;
         )
 
         # Unset from environment so arr is the sole owner (NAMED == 1).
-        # Assignments to arr[...] then modify in-place — no full-array copies.
+        # Assignments to arr[...] then modify in-place -- no full-array copies.
         arr <- MainEnvir$out_array
         MainEnvir$out_array <- NULL
 
@@ -1289,11 +1289,11 @@ function modify_simulation_state!(env::Dict;
 
             prop <- min(m2_lookup[[site]] / reef_areas[site_idx], 1.0)
 
-            # Extract small per-site slices — new objects, do not increment NAMED of arr
+            # Extract small per-site slices -- new objects, do not increment NAMED of arr
             no_sz <- arr[year_idx, site_idx, "no", , , 2:106]  # [n_ft, n_enh, 105]
             no_cv <- arr[year_idx, site_idx, "no", , , 1]       # [n_ft, n_enh]
 
-            # Assign in-place (vectorised over all FTs); no ft loop needed
+            # Assign in-place (vectorised over all FTs); no FT loop needed
             arr[year_idx, site_idx, "yes", , , 2:106] <- prop       * no_sz
             arr[year_idx, site_idx, "no",  , , 2:106] <- (1 - prop) * no_sz
             arr[year_idx, site_idx, "yes", , , 1]     <- no_cv

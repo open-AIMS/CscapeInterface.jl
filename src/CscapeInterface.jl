@@ -115,7 +115,7 @@ export get_simulation_output, get_raw_simulation_output, get_combined_cover_for_
 export modify_simulation_state!, finalise_simulation
 
 # Exports - Output access
-export load_output, build_cscape_output, get_yearly_data, get_site_data, get_cover_timeseries
+export load_output, load_ranking_inputs, build_cscape_output, get_yearly_data, get_site_data, get_cover_timeseries
 export yearly_iterator, site_iterator
 
 # Exports - Indicators

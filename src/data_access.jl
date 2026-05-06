@@ -246,6 +246,103 @@ end
 
 
 """
+    load_ranking_inputs(fpath, scenario_id; array_file, from_envir)
+        -> (cover, area_mat, spatial, site_ids, years, fts, kappa, meshpoints)
+
+Load only what is needed for MCDA site ranking: area-weighted combined cover
+`[years, sites, n_ft, n_enh]` plus spatial metadata.
+
+Avoids loading the full 106-metric array. The cover slice (metric 1) is extracted
+inside R before `rcopy`, so only ~1/106 of the data crosses the R-Julia boundary.
+
+# Keywords
+- `array_file`: Path to the `.rds` output file (required when `from_envir=false`)
+- `from_envir`: If `true`, extract the cover slice directly from `MainEnvir\$out_array`
+  already in the R session — no disk read at all
+"""
+function load_ranking_inputs(
+    fpath::String,
+    scenario_id::Int;
+    array_file::Union{String,Nothing} = nothing,
+    from_envir::Bool = false
+)
+    scenario_file     = joinpath(fpath, "ScenarioID.xlsx")
+    intervention_file = joinpath(fpath, "data", "Interventions$(scenario_id).RData")
+    isfile(scenario_file) || error("Scenario file not found: $scenario_file")
+
+    @rput fpath scenario_id scenario_file intervention_file
+    R"""
+    library(readxl)
+
+    scenario_tbl   <- read_excel($scenario_file)
+    scen_row       <- scenario_tbl[scenario_tbl[["ID"]] == $scenario_id, , drop = FALSE]
+    spatial_file_R <- scen_row[["Spatial_file"]][1]
+    demog_files_R  <- strsplit(scen_row[["Growth_Surv_file"]][1], "/")[[1]]
+
+    spatial_R  <- readRDS(file.path($fpath, "data", spatial_file_R))
+    interv_R   <- readRDS($intervention_file)
+    coral_df_R <- interv_R[["Coral"]]
+
+    mesh_R <- array(0, dim = c(length(demog_files_R), 100))
+    for (ft in seq_along(demog_files_R)) {
+        demog_ft     <- readRDS(file.path($fpath, "data", demog_files_R[ft]))
+        mesh_R[ft, ] <- demog_ft[["meshpoints_diam"]]
+    }
+    """
+
+    if from_envir
+        R"""
+        cover_slice_R <- MainEnvir$out_array[, , , , , 1]
+        dimnames_R    <- dimnames(MainEnvir$out_array)
+        """
+    else
+        isnothing(array_file) && error("array_file must be provided when from_envir=false")
+        isfile(array_file)    || error("Output file not found: $array_file")
+        @rput array_file
+        R"""
+        arr_tmp       <- readRDS($array_file)
+        cover_slice_R <- arr_tmp[, , , , , 1]
+        dimnames_R    <- dimnames(arr_tmp)
+        rm(arr_tmp); invisible(gc())
+        """
+    end
+
+    cover_raw  = rcopy(R"cover_slice_R")
+    R"rm(cover_slice_R); invisible(gc())"
+
+    dimnames_r = rcopy(R"dimnames_R")
+    spatial    = rcopy(R"spatial_R")
+    coral_df   = rcopy(R"coral_df_R")
+    meshpoints = rcopy(R"mesh_R")
+    R"rm(dimnames_R, spatial_R, interv_R, coral_df_R, mesh_R); invisible(gc())"
+
+    years    = parse.(Int, dimnames_r[:year])
+    site_ids = String.(dimnames_r[:reef_siteid])
+    fts      = String.(dimnames_r[:ft])
+
+    area_mat = _build_area_matrix(spatial, coral_df, site_ids)
+
+    # Area-weighted combined cover: [years, sites, n_ft, n_enh]
+    n_years, n_sites, _, n_ft, n_enh = size(cover_raw)
+    cover = Array{Float64,4}(undef, n_years, n_sites, n_ft, n_enh)
+    for site in 1:n_sites
+        tot      = area_mat[site, 3]
+        prop_non = tot > 0.0 ? area_mat[site, 1] / tot : 1.0
+        prop_int = tot > 0.0 ? area_mat[site, 2] / tot : 0.0
+        @views cover[:, site, :, :] .=
+            prop_non .* Float64.(coalesce.(cover_raw[:, site, 1, :, :], 0.0)) .+
+            prop_int .* Float64.(coalesce.(cover_raw[:, site, 2, :, :], 0.0))
+    end
+
+    kappa = spatial[!, :k] ./ 100.0
+
+    @info "Loaded ranking inputs" scenario=scenario_id from_envir=from_envir years="$(years[1])-$(years[end])" sites=length(site_ids)
+
+    return cover, area_mat, spatial, site_ids, years, fts, kappa, meshpoints
+end
+
+
+"""
     get_yearly_data(output::CscapeOutput, year::Int) -> Array
 
 Get all data for a specific year.
