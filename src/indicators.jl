@@ -64,25 +64,44 @@ Calculate reef indicators using ADRIAIndicators.
 # Returns
 Dict with indicator arrays.
 """
-function calculate_indicators(output::CscapeOutput; juvenile_threshold::Int = 5)
+function calculate_indicators(output::CscapeOutput; )
     
     adria = to_adria_format(output)
     cover = adria.cover
     habitable_area = adria.habitable_area
     reef_area = adria.reef_area
-    
+
+    colony_mean_diam_cm = mean(output.meshpoints)  # Approximate mean diameter for shelter volume calculation
+    #planar_area_params
+    #reference
+    #is_juvenile
+
     n_sizes = size(cover, 3)
-    is_juvenile = falses(n_sizes)
-    is_juvenile[1:juvenile_threshold] .= true
     
     results = Dict{String, Any}()
     
-    # Use ADRIAIndicators functions
+    # Calculate cover metrics
     results["relative_cover"] = ADRIAIndicators.relative_cover(cover)
     results["relative_loc_taxa_cover"] = ADRIAIndicators.relative_loc_taxa_cover(cover)
-    results["relative_juveniles"] = ADRIAIndicators.relative_juveniles(cover, is_juvenile)
     results["relative_taxa_cover"] = ADRIAIndicators.relative_taxa_cover(cover, habitable_area)
+    results["ltmp_cover"] = ADRIAIndicators.relative_cover(cover, habitable_area, reef_area)
+
     
+    # Calculate metrics
+    results["relative_shelter_volumne"] = ADRIAIndicators.relative_shelter_volume(cover,colony_mean_diam_cm,planar_area_params, habitable_area, reference)
+    results["coral_diversity"] = ADRIAIndicators.coral_diversity(results["relative_loc_taxa_cover"])
+    results["coral_evenness"] = ADRIAIndicators.coral_evenness(results["relative_loc_taxa_cover"])   
+    results["relative_juveniles"] = ADRIAIndicators.relative_juveniles(cover, is_juvenile)
+    results["juvenile_indicator"] = ADRIAIndicators.juvenile_indicator(cover, is_juvenile, habitable_area, colony_mean_diam_cm,15)
+
+    #Calculate reef indices
+    results["reef_biodiversity_condition_index"] = ADRIAIndicators.reef_biodiversity_condition_index(results["relative_loc_taxa_cover"],results["coral_diversity"], results["relative_shelter_volumne"])
+    results["reef_condition_index"] = ADRIAIndicators.reef_condition_index(results["ltmp_cover"], results["relative_shelter_volumne"], results["juvenile_indicator"])
+    results["reef_fish_index"] = ADRIAIndicators.reef_fish_index(results["relative_cover"])
+    results["reef_tourism_index"] = ADRIAIndicators.reef_tourism_index_no_rubble(results["ltmp_cover"], results["coral_evenness"], results["relative_shelter_volumne"], results["relative_juveniles"])
+    
+    
+
     # Metadata
     results["years"] = output.years
     results["site_ids"] = output.site_ids
