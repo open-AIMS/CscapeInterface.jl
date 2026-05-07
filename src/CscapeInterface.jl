@@ -119,6 +119,6 @@ export load_output, load_ranking_inputs, build_cscape_output, get_yearly_data, g
 export yearly_iterator, site_iterator
 
 # Exports - Indicators
-export to_adria_format, calculate_indicators, indicator_summary, export_for_adria
+export to_adria_format, calculate_indicators, indicator_summary, export_for_adria, save_indicators
 
 end

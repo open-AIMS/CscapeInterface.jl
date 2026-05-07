@@ -318,35 +318,9 @@ function _calculate_and_save_indicators(fpath::String, scenario_id::Int, draw_va
         end
         indicators = calculate_indicators(output)
 
-        # Prepare arrays for R
-        rel_cover = indicators.relative_cover
-        rel_juv = indicators.relative_juveniles
-        rel_taxa = indicators.relative_taxa_cover
-        rel_loc_taxa = indicators.relative_loc_taxa_cover
-        ind_years = indicators.years
-        ind_sites = indicators.site_ids
-        ind_fts = indicators.fts
-        
-        @rput rel_cover rel_juv rel_taxa rel_loc_taxa ind_years ind_sites ind_fts
-        
         indicator_path = joinpath(fpath, "adria_exports",
-                                  "Indicators_scenario_$(scenario_id)_draw_$(draw_str).rds")
-        @rput indicator_path
-        R"""
-        dir.create(dirname($indicator_path), showWarnings = FALSE, recursive = TRUE)
-        indicators_list <- list(
-            relative_cover = $rel_cover,
-            relative_juveniles = $rel_juv,
-            relative_taxa_cover = $rel_taxa,
-            relative_loc_taxa_cover = $rel_loc_taxa,
-            years = $ind_years,
-            site_ids = $ind_sites,
-            fts = $ind_fts
-        )
-        saveRDS(indicators_list, $indicator_path)
-        """
-        
-        @info "ADRIA indicators saved" path=indicator_path
+                                  "Indicators_scenario_$(scenario_id)_draw_$(draw_str).jld2")
+        save_indicators(indicators, indicator_path)
         indicator_summary(indicators)
         return indicators
     catch e

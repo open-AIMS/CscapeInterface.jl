@@ -178,6 +178,23 @@ function export_for_adria(output::CscapeOutput, filepath::String)
 end
 
 
+"""
+    save_indicators(ind::CscapeIndicators, filepath::String)
+
+Save a `CscapeIndicators` to a JLD2 file. Load downstream with:
+
+```julia
+using JLD2
+ind = load(filepath, "cscape_indicators")
+```
+"""
+function save_indicators(ind::CscapeIndicators, filepath::String)
+    mkpath(dirname(filepath))
+    jldsave(filepath; cscape_indicators = ind)
+    @info "Saved CscapeIndicators to $filepath"
+end
+
+
 
 """
     planar_area_params()
