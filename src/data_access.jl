@@ -15,6 +15,7 @@ struct CscapeOutput
     kappa::Vector{Float64}
     area::Matrix{Float64}          # [sites, intervention]
     meshpoints::Array{Float64,2} # [ft, sizes]
+    is_juvenile::Matrix{Bool}      # [ft, sizes]
     spatial::DataFrame      # Spatial data for sites
     metadata::Dict{String,Any}
 end
@@ -113,6 +114,7 @@ function build_cscape_output(
     spatial::DataFrame,
     coral_df::DataFrame,
     meshpoints::Matrix{Float64},
+    is_juvenile::AbstractMatrix{Bool},
     scenario_id::Int,
     draw::String,
     source_file::String
@@ -136,7 +138,7 @@ function build_cscape_output(
 
     @info "Built CscapeOutput" scenario=scenario_id size=size(out_array) years="$(years[1])-$(years[end])" sites=length(site_ids)
 
-    return CscapeOutput(out_array, years, site_ids, fts, kappa, area_mat, meshpoints, spatial, metadata)
+    return CscapeOutput(out_array, years, site_ids, fts, kappa, area_mat, meshpoints, Matrix{Bool}(is_juvenile), spatial, metadata)
 end
 
 
@@ -155,6 +157,7 @@ function build_cscape_output(
     spatial::DataFrame,
     area_mat::Matrix{Float64},
     meshpoints::Matrix{Float64},
+    is_juvenile::AbstractMatrix{Bool},
     scenario_id::Int,
     draw::String,
     source_file::String
@@ -175,7 +178,7 @@ function build_cscape_output(
 
     @info "Built CscapeOutput" scenario=scenario_id size=size(out_array) years="$(years[1])-$(years[end])" sites=length(site_ids)
 
-    return CscapeOutput(out_array, years, site_ids, fts, kappa, area_mat, meshpoints, spatial, metadata)
+    return CscapeOutput(out_array, years, site_ids, fts, kappa, area_mat, meshpoints, Matrix{Bool}(is_juvenile), spatial, metadata)
 end
 
 
@@ -243,23 +246,27 @@ function load_output(fpath::String, scenario_id::Int;
     coral_df_R   <- interv_R[["Coral"]]
 
     mesh_R <- array(0, dim = c(length(demog_files_R), 100))
+    is_juvenile_R <- array(FALSE, dim = c(length(demog_files_R), 100))
     for (ft in seq_along(demog_files_R)) {
         demog_ft     <- readRDS(file.path($fpath, "data", demog_files_R[ft]))
         mesh_R[ft, ] <- demog_ft[["meshpoints_diam"]]
+        juveniles <- as.vector(which(colSums(demog_ft[["fecundity_eggs"]])==0))
+        is_juvenile_R[ft, juveniles] <- TRUE
     }
     """
 
     spatial    = rcopy(R"spatial_R")
     coral_df   = rcopy(R"coral_df_R")
     meshpoints = rcopy(R"mesh_R")
-    R"rm(spatial_R, interv_R, coral_df_R, mesh_R); invisible(gc())"
+    is_juvenile = rcopy(R"is_juvenile_R")
+    R"rm(spatial_R, interv_R, coral_df_R, mesh_R, is_juvenile_R); invisible(gc())"
 
     years    = parse.(Int, dimnames_r[:year])
     site_ids = String.(dimnames_r[:reef_siteid])
     fts      = String.(dimnames_r[:ft])
 
     return build_cscape_output(raw_out_array, years, site_ids, fts,
-                                spatial, coral_df, meshpoints,
+                                spatial, coral_df, meshpoints, is_juvenile,
                                 scenario_id, draw, source_label)
 end
 

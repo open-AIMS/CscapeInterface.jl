@@ -6,6 +6,36 @@ using ADRIAIndicators
 using JLD2
 
 """
+    CscapeIndicators
+
+Container for all reef indicators calculated from a CscapeOutput.
+"""
+struct CscapeIndicators
+    # Cover metrics
+    relative_cover::Array{Float64,2}               # [timesteps × locations]
+    relative_loc_taxa_cover::Array{Float64,3}      # [timesteps × groups × locations]
+    relative_taxa_cover::Array{Float64,2}          # [timesteps × groups]
+    ltmp_cover::Array{Float64,2}                   # [timesteps × locations]
+    # Metrics
+    relative_shelter_volume::Array{Float64,4}      # [timesteps × groups × sizes × locations]
+    coral_diversity::Array{Float64,2}              # [timesteps × locations]
+    coral_evenness::Array{Float64,2}               # [timesteps × locations]
+    relative_juveniles::Array{Float64,2}           # [timesteps × locations]
+    juvenile_indicator::Array{Float64,2}           # [timesteps × locations]
+    relative_loc_taxa_juveniles::Array{Float64,3}  # [timesteps × groups × locations]
+    relative_taxa_juveniles::Array{Float64,2}      # [timesteps × groups]
+    # Reef indices
+    reef_biodiversity_condition_index::Array{Float64,2}  # [timesteps × locations]
+    reef_condition_index::Array{Float64,2}               # [timesteps × locations]
+    reef_fish_index::Array{Float64,2}                    # [timesteps × locations]
+    reef_tourism_index::Array{Float64,2}                 # [timesteps × locations]
+    # Metadata
+    years::Vector{Int}
+    site_ids::Vector{String}
+    fts::Vector{String}
+end
+
+"""
     to_adria_format(output::CscapeOutput; intervention_idx=1) -> NamedTuple
 
 Convert CscapeOutput to ADRIAIndicators format.
@@ -49,7 +79,7 @@ function to_adria_format(output::CscapeOutput; intervention_idx::Int = 3)
     
     return (
         cover = relativecover,
-        habitable_area = Float64.(output.kappa*output.area[:, intervention_idx]),
+        habitable_area = Float64.(output.kappa .* output.area[:, intervention_idx]),
         reef_area = Float64.(output.area[:, intervention_idx]),
         area = output.area[:, intervention_idx],
         meshpoints = output.meshpoints
@@ -58,84 +88,74 @@ end
 
 
 """
-    calculate_indicators(output::CscapeOutput; juvenile_threshold=5) -> Dict
+    calculate_indicators(output::CscapeOutput) -> CscapeIndicators
 
 Calculate reef indicators using ADRIAIndicators.
-
-# Returns
-Dict with indicator arrays.
 """
-function calculate_indicators(output::CscapeOutput; )
-    
+function calculate_indicators(output::CscapeOutput)
     adria = to_adria_format(output)
     cover = adria.cover
     habitable_area = adria.habitable_area
     reef_area = adria.reef_area
 
-    colony_mean_diam_cm = mean(output.meshpoints)  # Approximate mean diameter for shelter volume calculation
-    #planar_area_params
-    #reference
-    #is_juvenile
-
+    colony_mean_diam_cm = output.meshpoints
     n_sizes = size(cover, 3)
-    
-    results = Dict{String, Any}()
-    
-    # Calculate cover metrics
-    results["relative_cover"] = ADRIAIndicators.relative_cover(cover)
-    results["relative_loc_taxa_cover"] = ADRIAIndicators.relative_loc_taxa_cover(cover)
-    results["relative_taxa_cover"] = ADRIAIndicators.relative_taxa_cover(cover, habitable_area)
-    results["ltmp_cover"] = ADRIAIndicators.relative_cover(cover, habitable_area, reef_area)
+    pap_2d = planar_area_params()  # [groups, 2]
+    pap = repeat(reshape(pap_2d, size(pap_2d, 1), 1, size(pap_2d, 2)), 1, n_sizes, 1)  # [groups, sizes, 2]
+    reference = (mean(colony_mean_diam_cm), -8.79, 3.14)  # Tuple{T, T, T}: (mean diameter, intercept, coefficient)
+    is_juvenile = output.is_juvenile
 
-    
-    # Calculate metrics
-    results["relative_shelter_volumne"] = ADRIAIndicators.relative_shelter_volume(cover,colony_mean_diam_cm,planar_area_params, habitable_area, reference)
-    results["coral_diversity"] = ADRIAIndicators.coral_diversity(results["relative_loc_taxa_cover"])
-    results["coral_evenness"] = ADRIAIndicators.coral_evenness(results["relative_loc_taxa_cover"])   
-    results["relative_juveniles"] = ADRIAIndicators.relative_juveniles(cover, is_juvenile)
-    results["juvenile_indicator"] = ADRIAIndicators.juvenile_indicator(cover, is_juvenile, habitable_area, colony_mean_diam_cm,15)
+    # Cover metrics
+    rel_cover          = ADRIAIndicators.relative_cover(cover)
+    rel_loc_taxa_cover = ADRIAIndicators.relative_loc_taxa_cover(cover)
+    rel_taxa_cover     = ADRIAIndicators.relative_taxa_cover(cover, habitable_area)
+    ltmp_cov           = ADRIAIndicators.ltmp_cover(cover, habitable_area, reef_area)
 
-    #Calculate reef indices
-    results["reef_biodiversity_condition_index"] = ADRIAIndicators.reef_biodiversity_condition_index(results["relative_loc_taxa_cover"],results["coral_diversity"], results["relative_shelter_volumne"])
-    results["reef_condition_index"] = ADRIAIndicators.reef_condition_index(results["ltmp_cover"], results["relative_shelter_volumne"], results["juvenile_indicator"])
-    results["reef_fish_index"] = ADRIAIndicators.reef_fish_index(results["relative_cover"])
-    results["reef_tourism_index"] = ADRIAIndicators.reef_tourism_index_no_rubble(results["ltmp_cover"], results["coral_evenness"], results["relative_shelter_volumne"], results["relative_juveniles"])
-    
-    
+    # Metrics
+    rsv                  = ADRIAIndicators.relative_shelter_volume(cover, colony_mean_diam_cm, pap, habitable_area, reference)
+    rsv_2d               = dropdims(sum(rsv, dims=(2, 3)), dims=(2, 3))  # [timesteps × locations] for reef indices
+    coral_div            = ADRIAIndicators.coral_diversity(rel_loc_taxa_cover)
+    coral_even           = ADRIAIndicators.coral_evenness(rel_loc_taxa_cover)
+    rel_juv              = ADRIAIndicators.relative_juveniles(cover, is_juvenile)
+    juv_ind              = ADRIAIndicators.juvenile_indicator(cover, is_juvenile, habitable_area, colony_mean_diam_cm, 15.0)
+    rel_loc_taxa_juv     = ADRIAIndicators.relative_loc_taxa_juveniles(cover, is_juvenile)
+    rel_taxa_juv         = ADRIAIndicators.relative_taxa_juveniles(cover, is_juvenile, habitable_area)
 
-    # Metadata
-    results["years"] = output.years
-    results["site_ids"] = output.site_ids
-    results["fts"] = output.fts
-    
+    # Reef indices
+    rbci  = ADRIAIndicators.reef_biodiversity_condition_index(rel_cover, coral_div, rsv_2d)
+    rci   = ADRIAIndicators.reef_condition_index(ltmp_cov, rsv_2d, juv_ind)
+    rfi   = ADRIAIndicators.reef_fish_index(rel_cover)
+    rti   = ADRIAIndicators.reef_tourism_index_no_rubble(ltmp_cov, coral_even, rsv_2d, rel_juv)
+
     @info "Calculated indicators" n_years=length(output.years) n_sites=length(output.site_ids)
-    
-    return results
+
+    return CscapeIndicators(
+        rel_cover, rel_loc_taxa_cover, rel_taxa_cover, ltmp_cov,
+        rsv, coral_div, coral_even, rel_juv, juv_ind, rel_loc_taxa_juv, rel_taxa_juv,
+        rbci, rci, rfi, rti,
+        output.years, output.site_ids, output.fts
+    )
 end
 
 
 """
-    indicator_summary(results::Dict; year=nothing)
+    indicator_summary(ind::CscapeIndicators; year=nothing)
 
 Print summary of indicators.
 """
-function indicator_summary(results::Dict; year::Union{Int,Nothing} = nothing)
-    years = results["years"]
-    year_idx = isnothing(year) ? length(years) : findfirst(==(year), years)
-    
+function indicator_summary(ind::CscapeIndicators; year::Union{Int,Nothing} = nothing)
+    year_idx = isnothing(year) ? length(ind.years) : findfirst(==(year), ind.years)
+
     println("=" ^ 50)
-    println("INDICATOR SUMMARY - Year $(years[year_idx])")
+    println("INDICATOR SUMMARY - Year $(ind.years[year_idx])")
     println("=" ^ 50)
-    
-    for name in ["relative_cover", "relative_juveniles"]
-        if haskey(results, name)
-            data = results[name]
-            year_data = data[year_idx, :]
-            println("\n$name:")
-            println("  Mean: $(round(mean(year_data), digits=4))")
-            println("  Min:  $(round(minimum(year_data), digits=4))")
-            println("  Max:  $(round(maximum(year_data), digits=4))")
-        end
+
+    for (name, data) in [("relative_cover", ind.relative_cover), ("relative_juveniles", ind.relative_juveniles)]
+        year_data = data[year_idx, :]
+        println("\n$name:")
+        println("  Mean: $(round(mean(year_data), digits=4))")
+        println("  Min:  $(round(minimum(year_data), digits=4))")
+        println("  Max:  $(round(maximum(year_data), digits=4))")
     end
 end
 
@@ -155,4 +175,30 @@ function export_for_adria(output::CscapeOutput, filepath::String)
     mkpath(dirname(filepath))
     jldsave(filepath; cscape_output = output)
     @info "Exported CscapeOutput to $filepath"
+end
+
+
+
+"""
+    planar_area_params()
+
+Colony planar area parameters (see Fig 2B in [1])
+First column is `b`, second column is `a`
+log(S) = b + a * log(x)
+
+# References
+1. Aston Eoghan A., Duce Stephanie, Hoey Andrew S., Ferrari Renata (2022).
+    A Protocol for Extracting Structural Metrics From 3D Reconstructions of Corals.
+    Frontiers in Marine Science, 9.
+    https://doi.org/10.3389/fmars.2022.854395
+"""
+function planar_area_params()
+    return Array{Float64,2}([
+        -8.95 2.80      # Tabular Acropora
+        -9.13 2.94      # Corymbose Acropora
+        -8.90 2.94      # Corymbose non-Acropora (using branching pocillopora values from fig2B)
+        -8.87 2.30      # Small massives
+        -8.87 2.30      # Large massives
+        -8.90 2.94      # Corymbose non-Acropora Brooders (using branching pocillopora values from fig2B)
+    ])
 end

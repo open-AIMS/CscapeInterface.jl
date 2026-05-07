@@ -317,19 +317,19 @@ function _calculate_and_save_indicators(fpath::String, scenario_id::Int, draw_va
             output = load_output(fpath, scenario_id; draw=draw_str)
         end
         indicators = calculate_indicators(output)
-        
+
         # Prepare arrays for R
-        rel_cover = indicators["relative_cover"]
-        rel_juv = indicators["relative_juveniles"]
-        rel_taxa = indicators["relative_taxa_cover"]
-        rel_loc_taxa = indicators["relative_loc_taxa_cover"]
-        ind_years = indicators["years"]
-        ind_sites = indicators["site_ids"]
-        ind_fts = indicators["fts"]
+        rel_cover = indicators.relative_cover
+        rel_juv = indicators.relative_juveniles
+        rel_taxa = indicators.relative_taxa_cover
+        rel_loc_taxa = indicators.relative_loc_taxa_cover
+        ind_years = indicators.years
+        ind_sites = indicators.site_ids
+        ind_fts = indicators.fts
         
         @rput rel_cover rel_juv rel_taxa rel_loc_taxa ind_years ind_sites ind_fts
         
-        indicator_path = joinpath(fpath, "model_outputs",
+        indicator_path = joinpath(fpath, "adria_exports",
                                   "Indicators_scenario_$(scenario_id)_draw_$(draw_str).rds")
         @rput indicator_path
         R"""
@@ -563,7 +563,7 @@ function _run_cscape_single(input_data::Dict;
     # Run simulation with Julia batch acceleration
     print("Starting simulation...")
     tic()
-    run_simulation_with_julia_batch(InputData, $fun_path, RubbleHandle = FALSE)
+    MainEnvir <- run_simulation_with_julia_batch(InputData, $fun_path, RubbleHandle = FALSE)
     toc()
     print("Simulation complete!")
     """
