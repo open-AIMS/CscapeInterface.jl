@@ -78,13 +78,14 @@ using ModelParameters
 using ModelParameters: Model, Param, stripparams, parent
 
 # Include source files
-include("params.jl")          # ModelParameters types
-include("r_wrapper.jl")       # Call R, modify inputs
-include("data_access.jl")     # Load outputs, yearly access
-include("indicators.jl")      # ADRIAIndicators integration
+include("params.jl")           # ModelParameters types
+include("r_wrapper.jl")        # Call R, modify inputs
+include("data_access.jl")      # Load outputs, yearly access
+include("indicators.jl")       # ADRIAIndicators integration
+include("cscape_result_io.jl") # Multi-scenario ResultSet
 
 # Exports - Types
-export CscapeParams, CscapeOutput
+export CscapeParams, CscapeOutput, CScapeResultSet
 
 # Exports - ModelParameters
 export Model, Param  # Re-export from ModelParameters
@@ -120,5 +121,8 @@ export yearly_iterator, site_iterator
 
 # Exports - Indicators
 export to_adria_format, calculate_indicators, indicator_summary, export_for_adria, save_indicators
+
+# Exports - ResultSet
+export load_results, load_grouped_results, list_groups, save_results
 
 end

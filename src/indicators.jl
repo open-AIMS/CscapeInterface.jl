@@ -179,18 +179,25 @@ end
 
 
 """
-    save_indicators(ind::CscapeIndicators, filepath::String)
+    save_indicators(ind::CscapeIndicators, output::CscapeOutput, filepath::String)
 
-Save a `CscapeIndicators` to a JLD2 file. Load downstream with:
+Save a `CscapeIndicators` to a self-contained JLD2 file that also stores the spatial/domain
+metadata from `output` needed to construct a `CScapeResultSet` without loading the full output.
 
-```julia
-using JLD2
-ind = load(filepath, "cscape_indicators")
-```
+Keys saved: `cscape_indicators`, `loc_area`, `kappa`, `meshpoints`, `is_juvenile`,
+`spatial`, `metadata`.
 """
-function save_indicators(ind::CscapeIndicators, filepath::String)
+function save_indicators(ind::CscapeIndicators, output::CscapeOutput, filepath::String)
     mkpath(dirname(filepath))
-    jldsave(filepath; cscape_indicators = ind)
+    jldsave(filepath;
+        cscape_indicators = ind,
+        loc_area          = output.area[:, 3],
+        kappa             = output.kappa,
+        meshpoints        = output.meshpoints,
+        is_juvenile       = output.is_juvenile,
+        spatial           = output.spatial,
+        metadata          = output.metadata
+    )
     @info "Saved CscapeIndicators to $filepath"
 end
 

@@ -297,13 +297,18 @@ end
 # =============================================================================
 
 """
-    _calculate_and_save_indicators(fpath, scenario_id, draw_val) -> Union{Dict, Nothing}
+    _calculate_and_save_indicators(fpath, scenario_id, draw_val; output, filepath) -> Union{CscapeIndicators, Nothing}
 
-Internal: calculate ADRIA indicators from saved output and save as RDS.
+Internal: calculate ADRIA indicators from saved output and save as JLD2.
 Called automatically by `run_cscape` and `finalise_simulation`.
+
+`filepath` overrides the default save path. When `finalise_simulation` is called with
+a custom `filename`, the indicator file is placed alongside the output file so that
+parallel workers running the same scenario_id/draw do not overwrite each other.
 """
 function _calculate_and_save_indicators(fpath::String, scenario_id::Int, draw_val;
-                                         output = nothing)
+                                         output = nothing,
+                                         filepath::Union{String,Nothing} = nothing)
     draw_str = if isnothing(draw_val) || ismissing(draw_val)
         "NA"
     elseif draw_val isa Number && isnan(draw_val)
@@ -318,9 +323,14 @@ function _calculate_and_save_indicators(fpath::String, scenario_id::Int, draw_va
         end
         indicators = calculate_indicators(output)
 
-        indicator_path = joinpath(fpath, "adria_exports",
-                                  "Indicators_scenario_$(scenario_id)_draw_$(draw_str).jld2")
-        save_indicators(indicators, indicator_path)
+        indicator_path = if isnothing(filepath)
+            joinpath(fpath, "adria_exports",
+                     "Indicators_scenario_$(scenario_id)_draw_$(draw_str).jld2")
+        else
+            filepath
+        end
+        @info "Saving indicators to $indicator_path"
+        save_indicators(indicators, output, indicator_path)
         indicator_summary(indicators)
         return indicators
     catch e
@@ -1415,30 +1425,19 @@ finalise_simulation(env, filename="my_custom_run")
 finalise_simulation(env, calc_indicators=false)
 ```
 """
-function finalise_simulation(env::Dict; export_adria::Bool = true, 
+function finalise_simulation(env::Dict; export_adria::Bool = true,
                               calc_indicators::Bool = true,
                               filename::Union{String,Nothing} = nothing,
                               keep_open::Bool = false)
     fpath = env["fpath"]
     scenario_id = env["scenario_id"]
     fun_path = env["fun_path"]
-    
-    @rput fpath scenario_id fun_path
-    
-    if isnothing(filename)
-        R"""
-        source(file.path($fun_path, "modules/save_outputs.R"))
-        save_outputs(MainEnvir$out_array, MainEnvir$InputData, MainEnvir$InputData$draw)
-        """
-    else
-        @rput filename
-        R"""
-        source(file.path($fun_path, "modules/save_outputs.R"))
-        save_outputs(MainEnvir$out_array, MainEnvir$InputData, MainEnvir$InputData$draw, filename = $filename)
-        """
-    end
 
-    # Load output once from R env; share between ADRIA export and indicator calculation
+    @rput fpath scenario_id fun_path
+
+    # Capture draw and load output from R env BEFORE calling save_outputs.
+    # save_outputs.R may modify MainEnvir$out_array (e.g. adding a combined intervention
+    # slot), which would break a subsequent from_envir load.
     draw_val = rcopy(R"MainEnvir$InputData$draw")
     draw_str = if isnothing(draw_val) || ismissing(draw_val) || (draw_val isa Number && isnan(draw_val))
         "NA"
@@ -1457,15 +1456,34 @@ function finalise_simulation(env::Dict; export_adria::Bool = true,
         nothing
     end
 
+    if isnothing(filename)
+        R"""
+        source(file.path($fun_path, "modules/save_outputs.R"))
+        save_outputs(MainEnvir$out_array, MainEnvir$InputData, MainEnvir$InputData$draw)
+        """
+    else
+        @rput filename
+        R"""
+        source(file.path($fun_path, "modules/save_outputs.R"))
+        save_outputs(MainEnvir$out_array, MainEnvir$InputData, MainEnvir$InputData$draw, filename = $filename)
+        """
+    end
+
+    # Derive output-collocated paths when a custom filename is given,
+    # so parallel workers with the same scenario_id/draw don't overwrite each other.
+    adria_path, indicator_path = if isnothing(filename)
+        default_dir = joinpath(fpath, "adria_exports")
+        (joinpath(default_dir, "adria_scenario_$(scenario_id)_draw_$(draw_str).jld2"),
+         joinpath(default_dir, "Indicators_scenario_$(scenario_id)_draw_$(draw_str).jld2"))
+    else
+        base_name = splitext(basename(filename))[1]
+        out_dir   = dirname(filename) == "." ? joinpath(fpath, "adria_exports") : dirname(filename)
+        (joinpath(out_dir, "adria_" * base_name * ".jld2"),
+         joinpath(out_dir, "Indicators_" * base_name * ".jld2"))
+    end
+
     if export_adria && !isnothing(built_output)
-        adria_path = if isnothing(filename)
-            joinpath(fpath, "adria_exports",
-                     "adria_scenario_$(scenario_id)_draw_$(draw_str).jld2")
-        else
-            base_name = splitext(basename(filename))[1]
-            adria_dir = dirname(filename) == "." ? joinpath(fpath, "adria_exports") : dirname(filename)
-            joinpath(adria_dir, "adria_" * base_name * ".jld2")
-        end
+        @info "Saving ADRIA export to $adria_path"
         try
             export_for_adria(built_output, adria_path)
         catch e
@@ -1475,7 +1493,8 @@ function finalise_simulation(env::Dict; export_adria::Bool = true,
 
     # Calculate and save ADRIA indicators
     if calc_indicators
-        _calculate_and_save_indicators(fpath, scenario_id, draw_val; output=built_output)
+        _calculate_and_save_indicators(fpath, scenario_id, draw_val;
+                                        output=built_output, filepath=indicator_path)
     end
     
     if !keep_open
