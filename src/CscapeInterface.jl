@@ -124,5 +124,10 @@ export to_adria_format, calculate_indicators, indicator_summary, export_for_adri
 
 # Exports - ResultSet
 export load_results, load_grouped_results, list_groups, save_results
+export scenario_outcome, scenario_groups
+
+# Re-export ADRIA ResultSet interface helpers (not exported by ADRIA itself)
+import ADRIA: n_locations, n_scenarios, loc_k_area, loc_k
+export n_locations, n_scenarios, loc_k_area, loc_k
 
 end

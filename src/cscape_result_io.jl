@@ -1,4 +1,5 @@
 using ADRIA: ResultSet, EnvLayer, SimConstants
+import ADRIA.sensitivity: pawn
 using JLD2
 using DataFrames
 using YAXArrays
@@ -292,7 +293,7 @@ function _build_outcomes(
     ax_t  = Dim{:timesteps}(years)
     ax_l  = Dim{:locations}(site_ids)
     ax_sc = Dim{:scenarios}(1:n_s)
-    ax_sp = Dim{:species}(fts)
+    ax_sp = Dim{:species}(1:length(fts))  # integer labels — ADRIA.viz.taxonomy! requires Int species axis
 
     # 2D fields [timesteps × locations] → stack → [timesteps, locations, scenarios]
     for field in (
@@ -709,4 +710,77 @@ function reformat_cube(cscape_cube::YAXArray)::YAXArray
         cscape_cube = cscape_cube ./ 100
     end
     return cscape_cube
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ADRIA compatibility helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    pawn(rs::CScapeResultSet, y; S) -> YAXArray
+
+Override ADRIA's generic `ResultSet` dispatch so that only numeric columns from
+`rs.inputs` are passed to the matrix-based PAWN implementation. The generic path
+calls `Matrix(rs.inputs)` which yields `Matrix{Any}` whenever `inputs` contains
+non-Real columns (e.g. `draw::String`, connectivity/spatial path strings).
+"""
+function pawn(
+    rs::CScapeResultSet,
+    y::Union{AbstractVector{<:Real}, YAXArrays.Cubes.YAXArray};
+    S::Int64=10
+)::YAXArray
+    numeric_cols = filter(c -> eltype(rs.inputs[!, c]) <: Real, names(rs.inputs))
+    return pawn(select(rs.inputs, numeric_cols), y; S=S)
+end
+
+"""
+    scenario_outcome(rs::CScapeResultSet, key::Symbol) -> YAXArray [T × S]
+
+Area-weighted mean of any pre-computed `[T × L × S]` outcome across locations,
+returning a `[timesteps × scenarios]` YAXArray suitable for `ADRIA.viz.scenarios!`,
+`ADRIA.sensitivity.pawn`, and `ADRIA.sensitivity.tsa`.
+
+All 2D-per-location outcomes in `rs.outcomes` are supported:
+    :relative_cover, :relative_juveniles, :reef_fish_index,
+    :reef_condition_index, :reef_tourism_index,
+    :reef_biodiversity_condition_index, :relative_shelter_volume, etc.
+
+# Examples
+    scenario_outcome(rs, :relative_cover)
+    scenario_outcome(rs, :reef_fish_index)
+"""
+function scenario_outcome(rs::CScapeResultSet, key::Symbol)::YAXArray
+    outcome = rs.outcomes[key]                              # YAXArray [T × L × S]
+    data_3d = Float64.(collect(outcome))                    # Array{Float64,3} [T × L × S]
+    data_2d = ADRIAIndicators.scenario_metric(
+        data_3d, rs.loc_area, 2                            # dim 2 = locations
+    )                                                       # Array{Float64,2} [T × S]
+    ax_t = Dim{:timesteps}(collect(rs.env_layer_md.timeframe))
+    ax_s = Dim{:scenarios}(1:size(data_2d, 2))
+    return YAXArray((ax_t, ax_s), data_2d)
+end
+
+"""
+    scenario_groups(rs::CScapeResultSet; by=nothing) -> Dict{Symbol,BitVector}
+
+Group scenarios into named sets for use with ADRIA visualisation and sensitivity
+analysis. Pass the result to `ADRIA.viz.scenarios!(g, ax, outcomes, scen_groups)`.
+
+`by` may be any column name (as a Symbol) in `rs.inputs`. If `nothing`, all
+scenarios are returned as a single `:counterfactual` group (the key ADRIA uses
+for baseline/unmanaged scenarios in its standard color scheme).
+
+When using custom `by` keys (e.g. `:disturbance_intensity`), pass
+`opts=Dict(:by_RCP => true)` to `ADRIA.viz.scenarios!` so that the non-standard
+key names are accepted:
+    ADRIA.viz.scenarios!(g, ax, outcome, scen_groups; opts=Dict(:by_RCP => true))
+
+# Examples
+    scenario_groups(rs)                            # single :counterfactual group
+    scenario_groups(rs; by=:disturbance_intensity) # one group per unique value
+"""
+function scenario_groups(rs::CScapeResultSet; by::Union{Symbol,Nothing}=nothing)::Dict{Symbol,BitVector}
+    isnothing(by) && return Dict(:counterfactual => trues(nrow(rs.inputs)))
+    col = rs.inputs[!, by]
+    return Dict(Symbol(string(by, "_", v)) => col .== v for v in unique(col))
 end
