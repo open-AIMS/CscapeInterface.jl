@@ -76,6 +76,11 @@ using DataFrames
 using Statistics
 using ModelParameters
 using ModelParameters: Model, Param, stripparams, parent
+using Distributed
+using CSV
+using Printf
+using TimerOutputs
+
 
 # Include source files
 include("params.jl")           # ModelParameters types
@@ -83,6 +88,7 @@ include("r_wrapper.jl")        # Call R, modify inputs
 include("data_access.jl")      # Load outputs, yearly access
 include("indicators.jl")       # ADRIAIndicators integration
 include("cscape_result_io.jl") # Multi-scenario ResultSet
+include("dynamic_ranking.jl")   # Dynamic MCDA re-ranking workflow
 
 # Exports - Types
 export CscapeParams, CscapeOutput, CScapeResultSet
@@ -125,6 +131,17 @@ export to_adria_format, calculate_indicators, indicator_summary, export_for_adri
 # Exports - ResultSet
 export load_results, load_grouped_results, list_groups, save_results
 export scenario_outcome, scenario_groups
+
+# Exports - Dynamic reranking workflow
+export run_dynamic_reranking   # was main()
+export run_shared_phase
+export run_mcda_phase
+export build_iteration_configs
+export define_worker_code!
+export compute_rankings
+export compute_rankings_from_cover
+export MCDA_PREFS              # if kept as module-level const
+
 
 # Re-export ADRIA ResultSet interface helpers (not exported by ADRIA itself)
 import ADRIA: n_locations, n_scenarios, loc_k_area, loc_k
