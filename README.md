@@ -1,136 +1,452 @@
-# CscapeJulia
+# CscapeInterface.jl
 
-Julia wrapper for C-scape with ModelParameters.jl for ADRIA interoperability.
+Julia interface to the C-scape individual-based coral reef simulation model. Provides R integration via RCall, parallel batch scenario execution, MCDA-guided adaptive management workflows, and interoperability with [ADRIA.jl](https://github.com/open-AIMS/ADRIA.jl) for sensitivity analysis and visualisation.
 
-## Setup
+---
+
+## Installation
 
 ```julia
 using Pkg
-Pkg.activate("C:/path/C_scape/julia")
-Pkg.add("ModelParameters")
-Pkg.develop(path="C:/path/ADRIAIndicators.jl")
+Pkg.activate("path/to/CscapeInterface.jl")
 Pkg.instantiate()
 ```
 
-## Quick Start
+**Requirements:**
+- Julia ≥ 1.9
+- The C-scape R package installed locally. Its root path (the folder containing `run_cscape.R`, `ipm_pred.R`, etc.) is passed to `setup_r_environment` at the start of each session.
+
+---
+
+## Required Input Files
+
+All input files live in `fpath/data/`. The `ScenarioID.xlsx` file in `fpath/` records which file each scenario uses.
+
+| File | ScenarioID column | Description |
+|------|-------------------|----|
+| `<name>.RData` | `Spatial_file` | Reef site geometries, kappa, area, depths |
+| `<name>.RData` | `Connectivity_file` | Larval connectivity matrices (one per FT) |
+| `<name>.RData` | `Disturbance_file` | Temporal DHW and disturbance time series |
+| `demog_inputs_<ft>*.rds` | `Growth_Surv_file` | **Demographic IPM kernel, one file per functional type** |
+
+### Demographic files
+
+Demographic files are prepared independently of the C-scape simulation package using a dedicated IPM fitting workflow — they are not generated automatically. One RDS is needed per functional type; `Growth_Surv_file` stores all filenames for a scenario separated by `/`:
+
+```
+demog_inputs_acro_tableALLDAT.rds/demog_inputs_acro_corymALLDAT.rds/demog_inputs_corym_non_acroALLDAT.rds/...
+```
+
+Fields read by Julia (from `src/data_access.jl`):
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `meshpoints_diam` | numeric vector, length 100 | Size-class midpoints in diameter (cm) |
+| `fecundity_eggs` | matrix | Fecundity-by-size; columns with `colSums == 0` are flagged as juvenile classes |
+
+The C-scape R engine (`ipm_pred.R`) reads additional fields from the same file (growth kernels, survival vectors, recruitment distributions). See the C-scape R package documentation for the complete IPM input specification.
+
+> **Note:** filenames in `Growth_Surv_file` are case-sensitive — they must match the on-disk filenames exactly.
+
+---
+
+## Workflow 1 — Build Input Data and Run Scenarios
+
+> Source: `sandbox/CscapeInterface_MCDA_PAWN/Setup/DataWorkflow.jl`
+
+### Step 1 — Create C-scape input data (R via Julia)
 
 ```julia
-using Pkg
-Pkg.activate("C:/path/C_scape/julia")
-cd("C:/path/C_scape/julia")
-include("src/CscapeJulia.jl")
-using .CscapeJulia
+using RCall, CscapeInterface
 
-setup_r_environment(n_cores=4) #specify num of cores
-setup_r_environment(enable_parallel=false) #set parallel to false
-setup_r_environment()  #dafult
+fun_path = "C:/path/to/C_scape"          # root of the C-scape R package
+fpath    = "C:/path/to/model_runs/MyRun"  # output directory
 
+# Setup R and source the build helpers
+setup_r_environment(fun_path)
 
+@rput fun_path
+R"""
+setwd(fun_path)
+source("simulated_reef/build_spatial_file.R")
+source("simulated_reef/build_connectivity.R")
+source("simulated_reef/build_temporal.R")
+source("simulated_reef/build_scenario_table.R")
+library(sf)
 
-fpath = "C:/path/TestingInterventions"
-using BenchmarkTools
-@elapsed run_cscape(1, fpath)
+output_dir  <- file.path("C:/path/to/model_runs/MyRun", "data")
+start_year  <- 2025
+end_year    <- 2050
 
-# Run ALL scenarios in ScenarioID.xlsx
-run_cscape(fpath)
+# 1. Create spatial data
+spatial_data <- create_spatial_data(...)
 
-# Run specific scenarios
-run_cscape([1, 2, 3, 4, 5, 56], fpath)
+# 2. Create connectivity matrix
+connectivity_matrix <- create_connectivity_matrix(spatial_file_path = ..., output_path = ...)
+
+# 3. Create temporal/disturbance files
+temporal_results <- create_temporal_file(spatial_file_path = ..., ...)
+
+# 4. Build ScenarioID.xlsx
+scenario_data <- rbind(scenario_data_int, scenario_data_counter)
+scenario_data$ID <- 1:nrow(scenario_data)
+create_scenario_table(data = scenario_data,
+                      output_path = file.path(output_dir, "ScenarioID.xlsx"),
+                      sheet_name  = "ScenarioID")
+"""
+@info "Input data created"
+```
+
+See `DataWorkflow.jl` for a complete example that builds spatial, connectivity, and temporal files for a simulated 50-site reef with 4 disturbance levels and intervention/counterfactual scenarios.
+
+### Step 2 — Run scenarios in parallel
+
+```julia
+using Distributed, ProgressMeter, CscapeInterface, RCall
+
+const fpath    = "C:/path/to/model_runs/MyRun"
+const fun_path = "C:/path/to/C_scape"
+
+# Read all scenario IDs
+@rput fpath
+R"library(readxl); .scn <- read_excel(paste0($fpath, '/data/ScenarioID.xlsx'), sheet='ScenarioID')"
+all_ids = Int.(rcopy(R"as.integer(.scn$ID)"))
+@info "Running $(length(all_ids)) scenarios"
+
+# Spawn workers
+n_workers = max(1, Sys.CPU_THREADS - 1)
+addprocs(n_workers)
+
+@everywhere begin
+    using CscapeInterface
+    _fpath    = "C:/path/to/model_runs/MyRun"
+    _fun_path = "C:/path/to/C_scape"
+end
+
+# Progress bar
+p           = Progress(length(all_ids); desc="Scenarios: ", showspeed=true)
+progress_ch = RemoteChannel(() -> Channel{Bool}(length(all_ids)))
+@async for _ in all_ids; take!(progress_ch); next!(p); end
+
+failed = pmap(all_ids) do sid
+    result = try
+        setup_r_environment(_fun_path; enable_parallel=false)
+        run_cscape(sid, _fpath; export_adria=true, calc_indicators=true)
+        nothing
+    catch e
+        @error "Scenario $sid failed" exception=e
+        sid
+    end
+    put!(progress_ch, true)
+    result
+end |> x -> filter(!isnothing, x)
+
+finish!(p)
+isempty(failed) ? @info("All scenarios complete") : @warn("Failed: $failed")
+rmprocs(workers())
+```
+
+**Memory per worker:** each worker runs an independent R session with its own copy of all C-scape state (IPM kernels, temporal arrays, output arrays). Observed usage is **~12 GB RAM per worker** for typical runs (50 sites, 6 FTs, 25 years). As a starting point use:
+
+```julia
+n_workers = max(1, floor(Int, Sys.total_memory() / (12 * 2^30)) - 1)
+```
+
+Using `enable_parallel=false` inside each worker prevents R from spawning additional sub-threads, keeping memory usage predictable.
+
+### Step 3 — Load and save results
+
+```julia
+using CscapeInterface
+
+# Scan the results directory and build a CScapeResultSet
+rs = load_results(CScapeResultSet, fpath)
+
+# Persist to a JLD2 file for fast future reloads
+save_results(rs, joinpath(fpath, "all_results.jld2"))
+
+# Fast reload — skips all indicator file scanning
+rs = load_results(CScapeResultSet, joinpath(fpath, "all_results.jld2"))
+```
+
+| Function | Description |
+|----------|-------------|
+| `load_results(CScapeResultSet, fpath)` | Scan directory; load all indicator RDS files |
+| `load_results(CScapeResultSet, "file.jld2")` | Fast reload from a saved JLD2 |
+| `load_grouped_results(fpath)` | Load separately by spatial/connectivity group |
+| `load_grouped_results(fpath; group=1)` | Load a specific group |
+| `save_results(rs, "file.jld2")` | Save for fast future reload |
+| `list_groups(fpath)` | Preview available groups without loading data |
+
+---
+
+## Workflow 2 — MCDA Dynamic Reranking
+
+> Source: `sandbox/CscapeInterface_MCDA_PAWN/Setup/Workflow_MCDA_Evaluation.jl`
+
+This workflow runs repeated MCDA → simulation cycles. At the end of each cycle, the sites selected for coral deployment are re-evaluated based on updated cover, so the intervention adapts over time.
+
+### Configuration
+
+```julia
+using CscapeInterface
+
+cfg = Dict{String, Any}(
+    "scenario_id"    => 20,
+    "fpath"          => "C:/path/to/model_runs/MyRun",
+    "fun_path"       => "C:/path/to/C_scape",
+    "output_dirname" => "MCDA_results",
+    "n_workers"      => 2,
+    "shared_years"   => 2008:2024,   # burn-in years run once for all variants
+    "n_loops"        => 3,           # MCDA→simulation cycles
+    "loop_duration"  => 5,           # years per cycle  →  3 × 5 = 15 intervention years
+    "skip_shared"    => false,       # set true to reuse a previously saved baseline
+    "variants"       => [
+        # Intervention variant: deploy to top-5 ranked sites
+        Dict{String,Any}(
+            "n_sites"            => 5,
+            "selection"          => "top",
+            "ft"                 => 1,
+            "no_int_corals"      => 5000.0,
+            "proportion"         => 1.0,
+            "m2"                 => 3000.0,
+            "density"            => 5000/3000,
+            "meshpt_int_corals"  => "1.21",
+            "Enhancement"        => 3
+        ),
+        # Counterfactual: no intervention
+        Dict{String,Any}(
+            "n_sites"   => 0,
+            "selection" => "counterfactual",
+            "ft"        => 1, "no_int_corals" => 0, "proportion" => 0,
+            "m2" => 0, "density" => 0, "meshpt_int_corals" => "1.21", "Enhancement" => 0
+        ),
+    ]
+)
+```
+
+### Running
+
+```julia
+@elapsed CscapeInterface.run_dynamic_reranking(cfg)
+```
+
+### Analysing outputs
+
+```julia
+using CscapeInterface, Statistics
+
+_fpath  = cfg["fpath"]
+_outdir = cfg["output_dirname"]
+_sid    = cfg["scenario_id"]
+
+outdir = joinpath(_fpath, "adria", _outdir)
+
+# Load intervention and counterfactual outputs
+iter1_out = load_output(_fpath, _sid; filename = joinpath(outdir, "Array_scenario_$(_sid)_iter_1.rds"))
+iter2_out = load_output(_fpath, _sid; filename = joinpath(outdir, "Array_scenario_$(_sid)_iter_2.rds"))
+
+# Mean relative coral cover (cover / kappa) across sites over time
+function mean_rel_cover(out::CscapeOutput)
+    cover = get_cover_timeseries(out; intervention_idx=3)   # [years × sites]
+    return vec(mean(cover ./ out.kappa', dims=2))
+end
+
+rel_iter1 = mean_rel_cover(iter1_out)   # intervention
+rel_iter2 = mean_rel_cover(iter2_out)   # counterfactual
+years     = iter1_out.years
+```
+
+### Visualising
+
+```julia
+using Plots
+
+# Time-series comparison
+p1 = plot(years, rel_iter1; label="Top 5 (intervened)", lw=2, color=:steelblue)
+plot!(p1, years, rel_iter2; label="Counterfactual",      lw=2, color=:coral)
+xlabel!(p1, "Year"); ylabel!(p1, "Mean cover (%)"); title!(p1, "Coral cover / habitable area")
+savefig(p1, joinpath(outdir, "cover_timeseries.png"))
+
+# Difference
+p2 = plot(years, rel_iter1 .- rel_iter2;
+    label="Top 5 vs counterfactual", lw=2, color=:steelblue)
+xlabel!(p2, "Year"); ylabel!(p2, "Δ Mean cover (%)")
+savefig(p2, joinpath(outdir, "cover_difference.png"))
+```
+
+Per-loop intervention site maps are generated by reading the `deployment_iter_1.csv` output and the reef polygon geometry from `ScenarioID.xlsx`. See `Workflow_MCDA_Evaluation.jl` for the full map-plotting code.
+
+---
+
+## Workflow 3 — Visualisation and Sensitivity Analysis (ADRIA)
+
+> Source: `sandbox/CscapeInterface_MCDA_PAWN/Analysis/Visualisation.jl`
+
+> **Important:** WGLMakie (or GLMakie) must be loaded *before* ADRIA. This triggers ADRIA's `AvizExt` extension which provides all `ADRIA.viz.*` functions.
+
+### Load results
+
+```julia
+using WGLMakie, GeoMakie, GraphMakie   # must come before ADRIA
+WGLMakie.activate!()
+using ADRIA, CscapeInterface, Statistics
+
+fpath = "C:/path/to/model_runs/MyRun"
+rs    = load_results(CScapeResultSet, joinpath(fpath, "all_results.jld2"))
+
+# Inspect available content
+println("Locations : ", n_locations(rs))
+println("Scenarios : ", n_scenarios(rs))
+println("Timesteps : ", collect(timesteps(rs)))
+println("Outcomes  : ", sort(collect(keys(rs.outcomes))))
+println("Inputs    : ", names(rs.inputs))
+```
+
+### Scenario grouping
+
+Group scenarios by any column in `rs.inputs` — here by intervention status:
+
+```julia
+let interv = uppercase.(strip.(string.(rs.inputs[!, :Intervention])))
+    global scen_groups = filter!(
+        kv -> any(kv.second),
+        Dict{Symbol,BitVector}(
+            :counterfactual => interv .== "NO",
+            :guided         => interv .== "YES",
+        )
+    )
+end
+```
+
+### Scenario time-series plots
+
+```julia
+rel_cover = scenario_outcome(rs, :relative_cover)   # area-weighted mean [T × S]
+
+fig = Figure(size=(900, 400))
+g   = fig[1, 1] = GridLayout()
+ax  = Axis(g[1, 1]; title="Mean relative coral cover", xlabel="Year", ylabel="Relative cover")
+ADRIA.viz.scenarios!(g, ax, rel_cover, scen_groups;
+    opts=Dict{Symbol,Any}(:by_RCP => true, :histogram => false))
+```
+
+### Taxonomy (functional groups)
+
+```julia
+taxa_cover = rs.outcomes[:relative_taxa_cover]
+fig = Figure(size=(1200, 600))
+ADRIA.viz.taxonomy!(fig[1,1] = GridLayout(), taxa_cover, scen_groups)
+```
+
+### PAWN global sensitivity analysis
+
+```julia
+ts_all   = collect(timesteps(rs))
+ts_range = max(1, length(ts_all)-4):length(ts_all)
+
+# Scalar outcome: mean over last 5 timesteps per scenario
+y_cover = vec(mean(parent(rel_cover)[ts_range, :]; dims=1))
+
+pawn_si  = ADRIA.sensitivity.pawn(rs, y_cover)
+pawn_fig = ADRIA.viz.pawn(pawn_si)
+display(pawn_fig)
+```
+
+### Temporal Sensitivity Analysis (TSA)
+
+```julia
+tsa_si  = ADRIA.sensitivity.tsa(rs, parent(rel_cover))
+tsa_fig = ADRIA.viz.tsa(rs, tsa_si)
+display(tsa_fig)
 ```
 
 ---
 
-## Running Multiple Scenarios
+## Working with CScapeResultSet
+
+| Accessor | Returns |
+|----------|---------|
+| `n_locations(rs)` | Number of reef sites |
+| `n_scenarios(rs)` | Number of scenarios |
+| `timesteps(rs)` | Year vector |
+| `loc_k(rs)` | Carrying capacity per site |
+| `rs.outcomes[:relative_cover]` | YAXArray `(timesteps × locations × scenarios)` |
+| `scenario_outcome(rs, :relative_cover)` | Area-weighted mean over locations `(timesteps × scenarios)` |
+| `rs.inputs` | DataFrame of all input parameters |
+
+---
+
+## Advanced: Per-Timestep Control
+
+Run a simulation year by year, inspecting or modifying state between years.
 
 ```julia
-# Run ALL scenarios from ScenarioID.xlsx
-run_cscape(fpath)
+using CscapeInterface
 
-# Run specific scenario IDs
-run_cscape([1, 2, 3, 4, 5, 56], fpath)
+setup_r_environment(fun_path)
+fpath = "C:/path/to/model_runs/MyRun"
 
-# Customise settings and apply to multiple scenarios
-input_data = load_input_data(1, fpath)
-input_data["scenario_id"] = [1, 2, 3, 4, 5, 56]   # vector of IDs
-input_data["year_end"] = 2050
-input_data["Plasticity"] = 0.6
-run_cscape(input_data)
-# Each scenario loads its own data from ScenarioID.xlsx,
-# then year_end and Plasticity overrides are applied to all
+env = initialise_simulation(1, fpath)    # load data, allocate arrays — no years run yet
 
-# Skip indicators for speed during batch runs
-failed = run_cscape([1, 2, 3, 4, 5], fpath; calc_indicators=false)
-# Returns list of any scenario IDs that failed
+run_years!(env, 2008:2012)               # run first half
+
+# Inspect current state
+print_simulation_state(env)
+cover = get_site_cover(env)              # returns site names, kappa, proportion_full
+
+# Modify mid-simulation
+modify_simulation_state!(env;
+    kappa_scale        = 0.9,            # habitat degradation
+    plasticity         = 0.6,
+    connectivity_scale = 0.8
+)
+
+run_years!(env, 2013:2018)               # run second half
+
+finalise_simulation(env)                 # save output + calculate indicators
 ```
 
-### run_cscape Summary
+### Mid-simulation modifiable parameters
 
-| Call | What it does |
-|------|-------------|
-| `run_cscape(fpath)` | All scenarios in ScenarioID.xlsx |
-| `run_cscape(1, fpath)` | Single scenario |
-| `run_cscape([1,2,3], fpath)` | Multiple scenarios by ID |
-| `run_cscape(input_data)` | Single or multiple (if `scenario_id` is a vector), with custom overrides |
+| Argument | Type | What it does |
+|----------|------|--------------|
+| `kappa_scale` | Float | Multiply all kappa by a factor |
+| `kappa_values` | Vector{Float64} | Set kappa per site directly |
+| `dhw_threshold` | Vector{Float64} | Set bleaching threshold per site |
+| `dhw_enhance` | Float | DHW enhancement factor |
+| `plasticity` | Float or String | Plasticity value |
+| `heritability` | String | Heritability value |
+| `connectivity_scale` | Float | Scale connectivity matrix |
+| `fogging_reduction` | Float | Fogging heat reduction |
+| `coral_deployment` | Dict | Replace deployment schedule |
+| `fogging_schedule` | Dict | Replace fogging schedule |
+| `cots_mortality` | Dict | Modify COTS pressure in temporal data |
+
+### Per-timestep function reference
+
+| Function | Description |
+|----------|-------------|
+| `initialise_simulation(id, fpath)` | Set up without running any years |
+| `run_single_year!(env, year)` | Run a single year, return year output |
+| `run_years!(env, 2008:2018)` | Run a range of years |
+| `get_simulation_state(env)` | Current state info (sites, FTs, params) |
+| `get_site_cover(env)` | Cover, kappa, remaining capacity per site |
+| `modify_simulation_state!(env; ...)` | Modify state between years |
+| `finalise_simulation(env)` | Save output, calculate indicators, cleanup |
 
 ---
 
-## Using ModelParameters
+## Parameter Reference
 
-### Load and View Model
+### Numeric helpers — modify in place, no reassignment needed
 
 ```julia
-model = CscapeJulia.load_params(1, fpath)
-
-# View parameters table (shows only Param-wrapped numeric fields)
-model
-
-# Get all numeric values as tuple
-model[:val]
-
-# Get all bounds
-model[:bounds]
-
-# Get as vector (for Optim.jl)
-collect(model)
-
-# View ALL fields including strings/bools
-parent(model)
-
-# Convert to Dict to see everything
-to_dict(model)
-```
-
----
-
-## Helper Functions
-
-### Important: Reassignment Rules
-
-| Helper Type | Example | Reassign needed? |
-|-------------|---------|------------------|
-| **Numeric** | `set_rcp!(model, 2)` | ❌ No |
-| **String/Bool/Vector** | `model = set_region!(model, "Moore")` | ✅ Yes |
-| **set_params!** | `model = set_params!(model; ...)` | ✅ Yes |
-
----
-
-### Numeric Helpers (No reassignment needed)
-
-```julia
-model = CscapeJulia.load_params(1, fpath)
-
-# These modify in place - no reassignment needed
-set_rcp!(model, 2)              # Change RCP scenario
-set_year_end!(model, 2050)      # Change end year
-set_year_start!(model, 2024)    # Change start year
-set_plasticity!(model, 0.5)     # Change plasticity
-set_dhw_enhance!(model, 3.0)    # Change DHW enhancement
-set_draw!(model, 5)             # Change posterior draw
-set_cyclone_rep!(model, 2)      # Change cyclone replicate
-set_scenario_id!(model, 1)      # Change scenario ID
-set_heritability!(model, 0.3)   # Change heritability
-
-CscapeJulia.run_cscape(model)
+model = load_params(1, fpath)
+set_rcp!(model, 2)
+set_year_end!(model, 2050)
+set_plasticity!(model, 0.5)
+run_cscape(model)
 ```
 
 | Function | Parameter | Bounds |
@@ -141,49 +457,17 @@ CscapeJulia.run_cscape(model)
 | `set_year_start!(model, val)` | year_start | (2000, 2100) |
 | `set_year_end!(model, val)` | year_end | (2000, 2100) |
 | `set_plasticity!(model, val)` | Plasticity | (0, 1) |
-| `set_dhw_enhance!(model, val)` | DHW_enhance | (0.0, 10.0) |
+| `set_dhw_enhance!(model, val)` | DHW_enhance | (0, 10) |
 | `set_draw!(model, val)` | draw | (0, 1000) |
 | `set_heritability!(model, val)` | Heritability | (0, 1) |
 
----
-
-### String/Bool/Vector Helpers (Reassignment required)
+### String/Bool/Vector helpers — must reassign
 
 ```julia
-model = CscapeJulia.load_params(1, fpath)
-
-# These return a NEW model - MUST reassign!
 model = set_region!(model, "Moore")
-model = set_simulation_name!(model, "my_simulation")
-model = set_rootdir_data!(model, "/path/to/data")
-
-# Data files
-model = set_spatial_file!(model, "New_k_MooreReefCluster")
-model = set_connectivity_file!(model, "connectivity_matrix")
-model = set_disturbance_file!(model, "disturbance_data")
-model = set_growth_surv_file!(model, ["file1.RData", "file2.RData"])
-
-# Coral traits
-model = set_heat_tolerance!(model, "3groups")
-model = set_heat_init!(model, "equal")
-model = set_fts!(model, ["Acropora", "Pocillopora", "Massive"])
-model = set_init_cover!(model, "default_cover")
-
-# Model settings
-model = set_tradeoff!(model, "growth")
-model = set_output!(model, true)
-model = set_use_cached_ipm!(model, false)
-model = set_temp_growth_switch!(model, true)
-
-# Interventions
 model = set_intervention!(model, "Yes")
-model = set_intervened_sites!(model, "1,2,3,4,5")
-
-# Spatial
-model = set_sites!(model, true)  # Use all sites
-model = set_sites!(model, ["Site1", "Site2"])  # Specific sites
-
-CscapeJulia.run_cscape(model)
+model = set_intervened_sites!(model, "Site1/Site2/Site3")
+model = set_growth_surv_file!(model, ["demog_acro.rds", "demog_massive.rds"])
 ```
 
 | Function | Parameter | Type |
@@ -205,32 +489,22 @@ CscapeJulia.run_cscape(model)
 | `set_temp_growth_switch!(model, val)` | temp_growth_switch | Bool |
 | `set_intervention!(model, val)` | Intervention | String |
 | `set_intervened_sites!(model, val)` | intervened_sites | String |
-| `set_sites!(model, val)` | sites | Bool/Vector |
+| `set_sites!(model, val)` | sites | Bool / Vector |
 
----
+### `set_params!` — modify multiple parameters at once
 
-### set_params! - Modify Multiple Parameters At Once
-
-Use `set_params!` to modify multiple parameters (numeric, string, bool) in one call. **Always requires reassignment.**
+Always requires reassignment:
 
 ```julia
-model = CscapeJulia.load_params(1, fpath)
-
-# Modify multiple parameters at once
 model = set_params!(model;
-    rcp = 2,
-    year_end = 2050,
-    plasticity = 0.5,
-    region = "Moore",
-    spatial_file = "New_k_MooreReefCluster",
-    temp_growth_switch = true,
-    use_cached_ipm = false
+    rcp               = 2,
+    year_end          = 2050,
+    plasticity        = 0.5,
+    region            = "Moore",
+    spatial_file      = "reef_sites_1_nogeo.RData",
+    temp_growth_switch = true
 )
-
-CscapeJulia.run_cscape(model)
 ```
-
-**Available keyword arguments for set_params!:**
 
 | Keyword | Maps to |
 |---------|---------|
@@ -261,343 +535,3 @@ CscapeJulia.run_cscape(model)
 | `intervention` | Intervention |
 | `intervened_sites` | intervened_sites |
 | `sites` | sites |
-
----
-
-### WITHOUT Helper Functions
-
-```julia
-model = CscapeJulia.load_params(1, fpath)
-
-# Parameter order and index:
-# Index:     1            2           3      4           5         6          7            8
-# Param: scenario_id, Cyclone_rep, rcp, year_start, year_end, Plasticity, DHW_enhance, draw
-
-# Method 1: Set ALL values at once
-model[:val] = (1, 1, 2, 2024, 2050, 0.5, 3.0, 0)
-
-# Method 2: Modify single value using collect/Tuple
-v = collect(model[:val])
-v[3] = 2      # rcp at index 3
-v[5] = 2050   # year_end at index 5
-model[:val] = Tuple(v)
-
-# Method 3: Using splatting (change rcp at index 3)
-v = model[:val]
-model[:val] = (v[1:2]..., 2, v[4:8]...)
-
-CscapeJulia.run_cscape(model)
-```
-
-### Parameter Index Reference
-
-| Index | Parameter | Bounds | Description |
-|-------|-----------|--------|-------------|
-| 1 | scenario_id | (1, 1000) | Scenario ID |
-| 2 | Cyclone_rep | (1, 100) | Cyclone replicate |
-| 3 | rcp | (1, 4) | RCP scenario |
-| 4 | year_start | (2000, 2100) | Start year |
-| 5 | year_end | (2000, 2100) | End year |
-| 6 | Plasticity | (0, 1) | Plasticity |
-| 7 | DHW_enhance | (0.0, 10.0) | DHW enhancement |
-| 8 | draw | (0, 1000) | Posterior draw (0=mean) |
-
----
-
-## Example: Sensitivity Analysis
-
-```julia
-# Test different RCP scenarios (loop with modifications)
-for rcp_val in 1:4
-    model = CscapeJulia.load_params(1, fpath)
-    set_rcp!(model, rcp_val)
-    set_year_end!(model, 2050)
-    CscapeJulia.run_cscape(model)
-end
-```
-
----
-
-## Using Dict (Simpler Alternative)
-
-```julia
-input_data = CscapeJulia.load_input_data(1, fpath)
-input_data["year_end"] = 2050
-input_data["rcp"] = 2
-input_data["region"] = "Moore"
-CscapeJulia.run_cscape(input_data)
-```
-
----
-
-## Access Outputs
-
-```julia
-output = CscapeJulia.load_output(fpath, 1)
-cover = CscapeJulia.get_cover_timeseries(output)
-
-for (year, data) in CscapeJulia.yearly_iterator(output)
-    println("Year $year: $(mean(data[:, 1, :, :, 1]))")
-end
-```
-
----
-
-## ADRIA Indicators (Automatic)
-
-ADRIA indicators are calculated and saved automatically when a simulation completes, both for full runs (`run_cscape`) and year-by-year runs (`finalise_simulation`). Indicators are saved as an RDS file alongside the simulation output.
-
-**Output file:** `model_outputs/Indicators_scenario_{id}_draw_{draw}.rds`
-
-The saved RDS contains a list with:
-- `relative_cover` — Relative coral cover per site over time
-- `relative_juveniles` — Relative juvenile abundance per site over time
-- `relative_taxa_cover` — Relative cover by functional type
-- `relative_loc_taxa_cover` — Relative cover by location and functional type
-- `years`, `site_ids`, `fts` — Dimension labels
-
-### Automatic (default)
-
-```julia
-# Indicators calculated automatically after simulation
-run_cscape(1, fpath)
-
-# Also automatic after year-by-year runs
-env = initialise_simulation(1, fpath)
-run_years!(env, 2008:2018)
-finalise_simulation(env)   # indicators saved here
-```
-
-### Skip Indicator Calculation
-
-```julia
-run_cscape(1, fpath; calc_indicators=false)
-finalise_simulation(env, calc_indicators=false)
-```
-
-### Manual Calculation
-
-```julia
-output = CscapeJulia.load_output(fpath, 1)
-indicators = CscapeJulia.calculate_indicators(output)
-CscapeJulia.indicator_summary(indicators)
-```
-
-### Load Saved Indicators in R
-
-```r
-indicators <- readRDS("model_outputs/Indicators_scenario_1_draw_NA.rds")
-names(indicators)
-# [1] "relative_cover" "relative_juveniles" "relative_taxa_cover"
-# [4] "relative_loc_taxa_cover" "years" "site_ids" "fts"
-```
-
----
-
-## Per-Timestep Control (Year by Year)
-
-Run simulation year by year with ability to inspect/modify state between years.
-
-### Basic Year-by-Year Run
-
-```julia
-using .CscapeJulia
-
-setup_r_environment()
-fpath = "C:/Users/Jojo/Downloads/TestingInterventions"
-
-# Initialise (loads data, creates arrays, NO years run yet)
-env = initialise_simulation(1, fpath)
-
-# Run year by year
-for year in 2008:2018
-    output = run_single_year!(env, year)
-    println("Year $year complete")
-end
-
-# Save outputs (indicators calculated automatically)
-finalise_simulation(env)
-```
-
-### With State Modification Mid-Simulation
-
-```julia
-env = initialise_simulation(1, fpath)
-
-# Check state before running
-print_simulation_state(env)
-
-# Single year
-@elapsed run_single_year!(env, 2008)
-
-# Run first half - Multiple years
-@elapsed run_years!(env, 2008:2012)
-
-# Modify state mid-simulation
-modify_simulation_state!(env; 
-    kappa_scale = 0.9,          # Habitat degradation
-    plasticity = 0.6,           # Higher plasticity
-    heritability = "0.2_0.01",  # Higher heritability
-    connectivity_scale = 0.8    # Reduced connectivity
-)
-
-# Run second half
-@elapsed run_years!(env, 2013:2018)
-
-# Save with different options
-finalise_simulation(env)                                    # Default naming
-finalise_simulation(env, filename="my_run")                 # Custom filename
-finalise_simulation(env, filename="C:/results/my_run.rds")  # Full path
-finalise_simulation(env, export_adria=false)                # Skip ADRIA export
-finalise_simulation(env, calc_indicators=false)             # Skip indicators
-```
-
-### Mid-Simulation Modifiable Parameters
-
-| Parameter | Julia Argument | Type | What It Does |
-|-----------|----------------|------|--------------|
-| Kappa scale | `kappa_scale` | Float | Multiply all kappa by factor |
-| Kappa values | `kappa_values` | Vector{Float64} | Set kappa per site directly |
-| DHW threshold | `dhw_threshold` | Vector{Float64} | Set threshold per site directly |
-| DHW enhance | `dhw_enhance` | Float | Set DHW enhancement factor |
-| Plasticity | `plasticity` | Float or String | Set plasticity value |
-| Heritability | `heritability` | String | Set heritability value |
-| Connectivity scale | `connectivity_scale` | Float | Multiply connectivity by factor |
-| Fogging reduction | `fogging_reduction` | Float | Set fogging heat reduction |
-| Rubble handle | `rubble_handle` | Bool | Toggle rubble dynamics |
-| Coral deployment | `coral_deployment` | Dict | Replace coral deployment schedule |
-| Fogging schedule | `fogging_schedule` | Dict | Replace fogging schedule |
-| COTS mortality | `cots_mortality` | Dict | Modify COTS pressure in temporal data |
-
-### Adaptive Coral Deployment (Julia-only)
-
-Julia can inspect site cover mid-simulation and adaptively redirect coral deployment 
-to sites with available capacity.
-
-```julia
-env = initialise_simulation(1, fpath)
-
-# Run first half - Multiple years
-@elapsed run_years!(env, 2008:2012);
-
-cover_state = get_site_cover(env);
-available = findall(i -> cover_state[:proportion_full][i] < 0.8, 
-                    1:length(cover_state[:site_names]))
-deploy_sites = cover_state[:site_names][available[1:min(5, length(available))]]
-
-n = length(deploy_sites)
-new_deployment = Dict(
-    "reef_siteid"       => deploy_sites,
-    "Year"              => fill(2013, n),
-    "ft"                => fill(1, n),          # functional type 1
-    "no_int_corals"     => fill(1000.0, n),     # 1000 corals per site
-    "m2"                => fill(500.0, n),       # 500 m² deployment area
-    "meshpt_int_corals" => fill("4", n),         # size class
-    "Enhancement"       => fill(3, n)            # enhancement class 3
-)
-
-modify_simulation_state!(env; coral_deployment=new_deployment)
-
-
-run_years!(env, 2013:2018)
-finalise_simulation(env)
-```
-
-### Modifying Fogging Schedule Mid-Simulation
-
-```julia
-# Expand fogging to new sites based on bleaching risk
-modify_simulation_state!(env;
-    fogging_schedule = Dict(
-        "reef_siteid" => ["Moore_001", "Moore_002", "Moore_003"],
-        "year"        => [2015, 2015, 2015],
-        "reduction"   => [0.3, 0.3, 0.25]
-    )
-)
-```
-
-### Modifying COTS  Mid-Simulation
-
-```julia
-# Scale COTS for a specific year (e.g. simulate COTS control program)
-modify_simulation_state!(env;
-    cots_mortality = Dict("year" => 2015, "scale" => 0.5)
-)
-
-# Or set COTS directly at specific sites
-modify_simulation_state!(env;
-    cots_mortality = Dict(
-        "year"         => 2015,
-        "site_indices" => [1, 2, 3],
-        "values"       => [0.0 0.0 0.0;    # bin1
-                           0.0 0.0 0.0;    # bin2
-                           0.0 0.0 0.0;    # bin3
-                           0.0 0.0 0.0]    # bin4
-    )
-)
-```
-
-### Inspect State During Simulation
-
-```julia
-env = initialise_simulation(1, fpath)
-
-# Check simulation state (rcopy returns Symbol keys)
-state = get_simulation_state(env)
-println("Sites: $(state[:n_sites])")
-println("FTs: $(state[:fts])")
-
-# Check site cover
-cover = get_site_cover(env)
-println("First site: $(cover[:site_names][1]), full: $(round(cover[:proportion_full][1]*100, digits=1))%")
-
-# Run and get output
-run_single_year!(env, 2008)
-output = get_simulation_output(env)
-```
-
-### Per-Timestep Functions Reference
-
-| Function | Description |
-|----------|-------------|
-| `initialise_simulation(id, fpath)` | Setup without running any years |
-| `run_single_year!(env, year)` | Run single year, returns year output |
-| `run_years!(env, 2008:2012)` | Run multiple years |
-| `get_simulation_output(env)` | Get full output array |
-| `get_simulation_state(env)` | Get current state info |
-| `get_site_cover(env)` | Get cover, kappa, remaining capacity per site |
-| `modify_simulation_state!(env; ...)` | Modify state between years |
-| `finalise_simulation(env)` | Save outputs, calculate indicators, cleanup |
-
-### Compare: Full Run vs Year-by-Year
-
-**Full run (simple):**
-```julia
-run_cscape(1, fpath)
-```
-
-**Year-by-year (flexible):**
-```julia
-env = initialise_simulation(1, fpath)
-for year in 2008:2018
-    run_single_year!(env, year)
-end
-finalise_simulation(env)
-```
-
----
-
-## R Equivalent (Year by Year)
-
-```r
-source("modules/run_year.R")
-source("modules/save_outputs.R")
-
-MainEnvir <- initialise_simulation(InputData, fun_path)
-
-for (year in 2008:2018) {
-  run_single_year(year, MainEnvir)
-}
-
-save_outputs(MainEnvir$out_array, MainEnvir$InputData, NA)
-```
