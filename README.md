@@ -50,6 +50,64 @@ The C-scape R engine (`ipm_pred.R`) reads additional fields from the same file (
 
 ---
 
+## Output Files
+
+Each completed scenario writes up to three files, all inside `fpath`:
+
+| | File pattern | Folder | Format | Size |
+|---|---|---|---|---|
+| 1 | `Array_scenario_{id}_draw_{draw}.rds` | `model_outputs/` | R RDS | Large |
+| 2 | `adria_scenario_{id}_draw_{draw}.jld2` | `adria_exports/` | Julia JLD2 | Very large |
+| 3 | `Indicators_scenario_{id}_draw_{draw}.jld2` | `adria_exports/` | Julia JLD2 | Small |
+
+### Option 1 — C-scape raw output (`model_outputs/`)
+
+The original simulation array written by the C-scape R package. Contains the full 6D array `[years × sites × intervention × functional_types × enhancement × 106 metrics]`. This is the source of truth for all downstream products.
+
+```julia
+output = load_output(fpath, 1)             # load scenario 1, draw = NA
+output = load_output(fpath, 1; draw="5")   # specific posterior draw
+```
+
+### Option 2 — ADRIA full export (`adria_exports/adria_*.jld2`)
+
+The complete `CscapeOutput` Julia struct serialised to JLD2. Preserves every field (out_array, kappa, area, meshpoints, spatial metadata) so Julia-side analysis can be re-run without touching the R output again.
+
+```julia
+using JLD2
+output = load(joinpath(fpath, "adria_exports", "adria_scenario_1_draw_NA.jld2"), "cscape_output")
+```
+
+> **Recommendation for large batch runs:** these files are very large. For hundreds or thousands of scenarios, disable the full export and keep only the indicator files (Option 3) — `CScapeResultSet` analysis only needs those:
+> ```julia
+> run_cscape(sid, fpath; export_adria=false, calc_indicators=true)
+> ```
+
+### Option 3 — ADRIA indicators (`adria_exports/Indicators_*.jld2`)
+
+Pre-computed summary metrics produced by `ADRIAIndicators.jl`. Small and self-contained. This is the file scanned by `load_results(CScapeResultSet, fpath)` to build a `CScapeResultSet` for sensitivity analysis and visualisation.
+
+Each file stores:
+
+| Indicator | Dimensions |
+|-----------|------------|
+| `relative_cover` | timesteps × locations |
+| `relative_taxa_cover` | timesteps × functional groups |
+| `relative_juveniles` | timesteps × locations |
+| `coral_diversity` | timesteps × locations |
+| `coral_evenness` | timesteps × locations |
+| `relative_shelter_volume` | timesteps × groups × sizes × locations |
+| `reef_biodiversity_condition_index` | timesteps × locations |
+| `reef_condition_index` | timesteps × locations |
+| spatial metadata | kappa, area, meshpoints, site IDs |
+
+```julia
+# load_results scans adria_exports/ for all Indicators_*.jld2 files
+rs = load_results(CScapeResultSet, fpath)
+```
+
+---
+
 ## Workflow 1 — Build Input Data and Run Scenarios
 
 > Source: `sandbox/CscapeInterface_MCDA_PAWN/Setup/DataWorkflow.jl`
